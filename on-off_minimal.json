@@ -1,0 +1,15 @@
+{
+  "endpoint": 1,
+  "device_type": "OnOffPlugInUnit (0x010A)",
+  "clusters": {
+    "server": {
+      "Basic Information (0x0028)": { "attributes": [] },
+      "Identify (0x0003)": { "attributes": [] },
+      "OnOff (0x0006)": {
+        "attributes": ["OnOff", "GlobalSceneControl", "OnTime", "OffWaitTime", "StartUpOnOff"],
+        "commands": ["On", "Off", "Toggle"]
+      },
+      "Descriptor (0x001D)": {}
+    }
+  }
+}

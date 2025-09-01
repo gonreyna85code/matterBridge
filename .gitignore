@@ -1,0 +1,10 @@
+/.clangd
+/.devcontainer
+/.vscode
+/CMakeLists.txt
+/build
+/dependencies.lock
+/managed_components
+/partitions.csv
+/sdkconfig
+/sdkconfig.defaults
