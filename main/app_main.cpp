@@ -119,10 +119,13 @@ void udp_task(void* pvParameters) {
                 dynamic_ep = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
                 if (dynamic_ep != nullptr) {
                     on_off_plugin_unit_endpoint_id = endpoint::get_id(dynamic_ep);
-
+                    // Cluster On/Off
                     cluster::on_off::config_t onoff_cfg{};                    
                     onoff_cfg.on_off = false;
                     cluster::on_off::create(dynamic_ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
+                    // Cluster Bridged Device Basic Info
+                    cluster::bridged_device_basic_information::config_t basic_info_cfg{};
+                    cluster::bridged_device_basic_information::create(dynamic_ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
 
                     endpoint::enable(dynamic_ep);
 
