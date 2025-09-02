@@ -7,6 +7,8 @@
 #include <esp_log.h>
 #include <nvs_flash.h>
 #include <lwip/sockets.h>
+#include <map>
+#include <string>
 
 #define BROADCAST_PORT 12345
 #define BUF_SIZE 128
@@ -69,6 +71,8 @@ static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint
 }
 
 // Task FreeRTOS para escuchar broadcast del ESP01
+static endpoint_t* dynamic_ep = nullptr;
+
 void udp_task(void* pvParameters) {
     node_t* node = (node_t*)pvParameters;
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -77,6 +81,10 @@ void udp_task(void* pvParameters) {
         vTaskDelete(NULL);
         return;
     }
+
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = htons(BROADCAST_PORT);
@@ -87,33 +95,59 @@ void udp_task(void* pvParameters) {
         vTaskDelete(NULL);
         return;
     }
+
     char buf[BUF_SIZE];
     struct sockaddr_in source_addr;
     socklen_t socklen = sizeof(source_addr);
+
+    static std::map<std::string, time_t> esp01_last_seen;
+    static bool endpoint_created = false;
+
     while (true) {
+        time_t now = esp_timer_get_time() / 1000; // ms
+
         int len = recvfrom(sock, buf, BUF_SIZE - 1, 0, (struct sockaddr *)&source_addr, &socklen);
         if (len > 0) {
-            buf[len] = 0; // null terminate
+            buf[len] = 0;
+            std::string device_id(buf);
             ESP_LOGI(TAG, "ESP01 detectado: %s", buf);
-            // Crear endpoint solo una vez
-            static bool endpoint_created = false;
+
+            esp01_last_seen[device_id] = now;
+
             if (!endpoint_created) {
-                on_off_plugin_unit::config_t on_off_plugin_unit_config;  // <--- declarar aquí
-                endpoint_t* ep = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                if (ep != nullptr) {
-                    on_off_plugin_unit_endpoint_id = endpoint::get_id(ep);
+                on_off_plugin_unit::config_t on_off_plugin_unit_config;
+                dynamic_ep = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                if (dynamic_ep != nullptr) {
+                    on_off_plugin_unit_endpoint_id = endpoint::get_id(dynamic_ep);
+
                     cluster::on_off::config_t onoff_cfg{};                    
                     onoff_cfg.on_off = false;
-                    cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
-                    endpoint::enable(ep);
+                    cluster::on_off::create(dynamic_ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
+
+                    endpoint::enable(dynamic_ep);
+
                     ESP_LOGI(TAG, "Endpoint On/Off creado dinámicamente, endpoint_id=%d", on_off_plugin_unit_endpoint_id);
                     endpoint_created = true;
                 }
             }
         }
+
+        // revisar offline
+        for (auto &entry : esp01_last_seen) {
+            if (now - entry.second > 10000) { // 5s timeout
+                if (dynamic_ep != nullptr) {
+                    endpoint::destroy(node, dynamic_ep); // 🔥 acá destruís el endpoint
+                    dynamic_ep = nullptr;
+                    endpoint_created = false;
+                    ESP_LOGI(TAG, "ESP01 OFFLINE: %s, endpoint destruido", entry.first.c_str());
+                }
+            }
+        }
+
         vTaskDelay(500 / portTICK_PERIOD_MS);
     }
 }
+
 
 extern "C" void app_main()
 {
