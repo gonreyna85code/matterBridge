@@ -20,6 +20,9 @@
 #include <esp_matter_console_bridge.h>
 
 #include <common_macros.h>
+#include <freertos/semphr.h>
+
+static SemaphoreHandle_t esp01_mutex = nullptr;
 
 static const char *TAG = "app_main";
 uint16_t on_off_plugin_unit_endpoint_id = 0;
@@ -82,8 +85,7 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     }
 }
 
-static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id,
-                                         uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
+static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
 {
     esp_err_t err = ESP_OK;
     if (type == PRE_UPDATE)
@@ -120,6 +122,10 @@ std::string map_str_from_map(const std::map<std::string, esp01_info_t> &map)
 void udp_task(void *pvParameters)
 {
     node_t *node = (node_t *)pvParameters;
+
+    if (!esp01_mutex)
+        esp01_mutex = xSemaphoreCreateMutex();
+
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0)
     {
@@ -147,7 +153,6 @@ void udp_task(void *pvParameters)
     struct sockaddr_in source_addr;
     socklen_t socklen = sizeof(source_addr);
 
-    // Inicializar NVS
     nvs_handle_t nvs_handle;
     nvs_open("esp01", NVS_READWRITE, &nvs_handle);
 
@@ -161,82 +166,84 @@ void udp_task(void *pvParameters)
             std::string device_id(buf);
             ESP_LOGI(TAG, "ESP01 detectado: %s", buf);
 
-            auto &info = esp01_map[device_id];
-            info.last_seen = now;
-
-            endpoint_t *ep = info.ep;
-
-            if (!ep)
+            if (xSemaphoreTake(esp01_mutex, portMAX_DELAY) == pdTRUE)
             {
-                // Crear nuevo endpoint
-                on_off_plugin_unit::config_t on_off_plugin_unit_config;
-                ep = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                if (ep)
+                auto it = esp01_map.find(device_id);
+                if (it != esp01_map.end() && it->second.ep != nullptr)
                 {
-                    uint16_t ep_id = endpoint::get_id(ep);
-
-                    // Crear Clusters
-                    cluster::on_off::config_t onoff_cfg{};
-                    cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
-
-                    // Crear BridgedDeviceBasicInformation cluster
-                    cluster::bridged_device_basic_information::config_t basic_info_cfg{};
-                    cluster::bridged_device_basic_information::create(ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
-
-                    // Setear NodeLabel
-                    attribute_t *node_label_attr = attribute::get(
-                        ep_id,
-                        chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                        chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-
-                    if (node_label_attr)
+                    it->second.last_seen = now;
+                    if (!it->second.reachable)
                     {
-                        const char *node_label_str = device_id.c_str(); // usar UID como NodeLabel
-                        esp_matter_attr_val_t val = esp_matter_char_str((char *)node_label_str, strlen(node_label_str));
-                        attribute::set_val(node_label_attr, &val);
-                        attribute::report(
-                            ep_id,
-                            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                            &val);
-                        ESP_LOGI(TAG, "Endpoint %d -> NodeLabel set to %s", ep_id, node_label_str);
+                        it->second.reachable = true;
+                        set_reachable(endpoint::get_id(it->second.ep), true);
+                        ESP_LOGI(TAG, "ESP01 REACTIVADO: %s", device_id.c_str());
                     }
-
-                    endpoint::enable(ep);
-                    info.ep = ep;
-                    info.reachable = true;
-
-                    // Guardar en NVS
-                    nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
-                    nvs_commit(nvs_handle);
-                    ESP_LOGI(TAG, "Nuevo endpoint creado: UID=%s, EP=%d", device_id.c_str(), ep_id);
+                    xSemaphoreGive(esp01_mutex);
+                    continue;
                 }
-            }
-            else if (!info.reachable)
-            {
-                info.reachable = true;
-                set_reachable(endpoint::get_id(ep), true);
-                ESP_LOGI(TAG, "ESP01 REACTIVADO: %s", device_id.c_str());
 
-                // Guardar flag en NVS
+                // Nuevo dispositivo
+                esp01_info_t &info = esp01_map[device_id];
+                info.last_seen = now;
+
+                on_off_plugin_unit::config_t on_off_plugin_unit_config;
+                endpoint_t *ep = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                if (!ep)
+                {
+                    xSemaphoreGive(esp01_mutex);
+                    continue;
+                }
+
+                uint16_t ep_id = endpoint::get_id(ep);
+                cluster::on_off::config_t onoff_cfg{};
+                cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
+                cluster::bridged_device_basic_information::config_t basic_info_cfg{};
+                cluster::bridged_device_basic_information::create(ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
+
+                attribute_t *node_label_attr = attribute::get(
+                    ep_id,
+                    chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+                    chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
+
+                if (node_label_attr)
+                {
+                    esp_matter_attr_val_t val = esp_matter_char_str((char *)device_id.c_str(), device_id.size());
+                    attribute::set_val(node_label_attr, &val);
+                    attribute::report(ep_id,
+                                      chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+                                      chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
+                                      &val);
+                }
+
+                endpoint::enable(ep);
+                info.ep = ep;
+                info.reachable = true;
+
                 nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
                 nvs_commit(nvs_handle);
+
+                ESP_LOGI(TAG, "Nuevo endpoint creado: UID=%s, EP=%d", device_id.c_str(), ep_id);
+
+                xSemaphoreGive(esp01_mutex);
             }
         }
 
         // Revisar dispositivos offline
-        for (auto &entry : esp01_map)
+        if (xSemaphoreTake(esp01_mutex, portMAX_DELAY) == pdTRUE)
         {
-            if (entry.second.ep && entry.second.reachable && now - entry.second.last_seen > 10000)
+            for (auto &entry : esp01_map)
             {
-                entry.second.reachable = false;
-                set_reachable(endpoint::get_id(entry.second.ep), false);
-                ESP_LOGI(TAG, "ESP01 OFFLINE: %s, endpoint desactivado", entry.first.c_str());
+                if (entry.second.ep && entry.second.reachable && now - entry.second.last_seen > 10000)
+                {
+                    entry.second.reachable = false;
+                    set_reachable(endpoint::get_id(entry.second.ep), false);
+                    ESP_LOGI(TAG, "ESP01 OFFLINE: %s, endpoint desactivado", entry.first.c_str());
 
-                // Guardar flag en NVS
-                nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
-                nvs_commit(nvs_handle);
+                    nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
+                    nvs_commit(nvs_handle);
+                }
             }
+            xSemaphoreGive(esp01_mutex);
         }
 
         vTaskDelay(500 / portTICK_PERIOD_MS);
@@ -245,103 +252,84 @@ void udp_task(void *pvParameters)
     nvs_close(nvs_handle);
 }
 
+
 void restore_endpoints(node_t *node)
 {
     nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("esp01", NVS_READWRITE, &nvs_handle);
-    ESP_LOGI(TAG, "Opening NVS: %s", esp_err_to_name(err));
-    if (err != ESP_OK)
-        return;
+    if (nvs_open("esp01", NVS_READWRITE, &nvs_handle) != ESP_OK) return;
 
     size_t required_size = 0;
-    err = nvs_get_str(nvs_handle, "device_map", nullptr, &required_size);
-    ESP_LOGI(TAG, "Getting device_map size: %s, required_size=%d", esp_err_to_name(err), required_size);
-    if (err != ESP_OK || required_size == 0)
-    {
-        ESP_LOGI(TAG, "No endpoints to restore");
+    if (nvs_get_str(nvs_handle, "device_map", nullptr, &required_size) != ESP_OK || required_size == 0)
         return;
-    }
 
     std::vector<char> buf(required_size);
-    err = nvs_get_str(nvs_handle, "device_map", buf.data(), &required_size);
-    ESP_LOGI(TAG, "Reading device_map: %s", esp_err_to_name(err));
-    if (err != ESP_OK)
+    if (nvs_get_str(nvs_handle, "device_map", buf.data(), &required_size) != ESP_OK)
         return;
 
-    std::string map_str(buf.data());
-    ESP_LOGI(TAG, "device_map content: '%s'", map_str.c_str());
-
-    size_t start = 0;
-    while (start < map_str.size())
+    const char* str = buf.data();
+    while (*str)
     {
-        // Buscar la coma que separa EP y reachable
-        size_t end = map_str.find(',', start);
-        if (end == std::string::npos)
-            break; // mal formado
+        const char* colon = strchr(str, ':');
+        if (!colon) break;
 
-        std::string entry = map_str.substr(start, end - start); // 'UID:EP'
-        char reachable_char = map_str[end + 1];                 // '0' o '1'
+        std::string uid(str, colon - str);
 
-        start = end + 2; // saltar coma + reachable
+        const char* comma = strchr(colon + 1, ',');
+        if (!comma) break;
 
-        size_t sep = entry.find(':'); // separa UID y EP
-        if (sep == std::string::npos)
+        uint16_t ep_id = atoi(std::string(colon + 1, comma - (colon + 1)).c_str());
+
+        const char* next_comma = strchr(comma + 1, ',');
+        bool reachable = *(comma + 1) == '1';
+
+        // Evitar duplicados
+        if (esp01_map.find(uid) != esp01_map.end())
         {
-            ESP_LOGW(TAG, "Malformed entry skipped");
-            continue;
+            esp01_map[uid].reachable = reachable;
+            esp01_map[uid].last_seen = esp_timer_get_time() / 1000;
+            if (!reachable) set_reachable(ep_id, false);
+        }
+        else
+        {
+            // Crear endpoint solo si no existe
+            on_off_plugin_unit::config_t cfg{};
+            endpoint_t *ep = on_off_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+            if (!ep) { str = next_comma ? next_comma + 1 : comma + 1; continue; }
+
+            uint16_t new_ep_id = endpoint::get_id(ep);
+
+            cluster::on_off::config_t onoff_cfg{};
+            cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
+
+            cluster::bridged_device_basic_information::config_t bdbi_cfg{};
+            cluster::bridged_device_basic_information::create(ep, &bdbi_cfg, CLUSTER_FLAG_SERVER);
+
+            attribute_t *node_label_attr = attribute::get(new_ep_id,
+                                                          chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+                                                          chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
+            if (node_label_attr)
+            {
+                esp_matter_attr_val_t val = esp_matter_char_str((char*)uid.c_str(), uid.size());
+                attribute::set_val(node_label_attr, &val);
+                attribute::report(new_ep_id,
+                                  chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+                                  chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
+                                  &val);
+            }
+
+            endpoint::enable(ep);
+            esp01_map[uid] = {ep, esp_timer_get_time() / 1000, reachable};
+            if (!reachable) set_reachable(new_ep_id, false);
         }
 
-        std::string uid = entry.substr(0, sep);
-        uint16_t saved_ep_id = std::stoi(entry.substr(sep + 1));
-        bool reachable = (reachable_char == '1');
-
-        ESP_LOGI(TAG, "Parsed UID=%s EP=%d reachable=%d", uid.c_str(), saved_ep_id, reachable);
-
-        // --- Crear endpoint ---
-        on_off_plugin_unit::config_t cfg{};
-        endpoint_t *ep = on_off_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-        if (!ep)
-        {
-            ESP_LOGW(TAG, "Failed to create endpoint for UID=%s", uid.c_str());
-            continue;
-        }
-
-        uint16_t new_ep_id = endpoint::get_id(ep);
-
-        // Clusters
-        cluster::on_off::config_t onoff_cfg{};
-        cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
-
-        cluster::bridged_device_basic_information::config_t bdbi_cfg{};
-        cluster::bridged_device_basic_information::create(ep, &bdbi_cfg, CLUSTER_FLAG_SERVER);
-
-        // NodeLabel con UID
-        attribute_t *node_label_attr = attribute::get(
-            new_ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-
-        if (node_label_attr)
-        {
-            esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
-            attribute::set_val(node_label_attr, &val);
-            attribute::report(new_ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
-
-        endpoint::enable(ep);
-        ESP_LOGI(TAG, "Restored endpoint UID=%s, oldEP=%u, newEP=%u, reachable=%d",
-                 uid.c_str(), saved_ep_id, new_ep_id, reachable);
-
-        // Actualizar map global
-        esp01_map[uid] = {ep, esp_timer_get_time() / 1000, reachable};
-
-        if (!reachable)
-            set_reachable(new_ep_id, false);
+        // Avanzar al siguiente
+        str = next_comma ? next_comma + 1 : comma + 1;
+        vTaskDelay(1 / portTICK_PERIOD_MS); // ceder CPU y reset watchdog
     }
+
+    nvs_close(nvs_handle);
 }
+
 
 extern "C" void app_main()
 {
