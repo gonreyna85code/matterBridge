@@ -254,19 +254,7 @@ extern "C" void app_main()
     aggregator::config_t aggregator_config;
     endpoint_t *aggregator = endpoint::aggregator::create(node, &aggregator_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(aggregator != nullptr, ESP_LOGE(TAG, "Failed to create aggregator endpoint"));
-
-    /* ejemplo de endpoint On/Off (enchufe especificamente) */
-    // on_off_plugin_unit::config_t on_off_plugin_unit_config;
-    // endpoint_t *endpoint = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_NONE, NULL);
-    // ABORT_APP_ON_FAILURE(endpoint != nullptr, ESP_LOGE(TAG, "Failed to create switch endpoint"));
-
-    // on_off_plugin_unit_endpoint_id = endpoint::get_id(endpoint);
-    // ESP_LOGI(TAG, "Light creado con endpoint_id %d", on_off_plugin_unit_endpoint_id);
-
-    // cluster::on_off::config_t onoff_cfg{};
-    // onoff_cfg.on_off = false;  // estado inicial
-    // cluster_t *onoff_cluster = cluster::on_off::create(endpoint, &onoff_cfg, CLUSTER_FLAG_SERVER);
-
+    
     /* Matter start */
     err = esp_matter::start(app_event_cb);
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
@@ -279,6 +267,6 @@ extern "C" void app_main()
     esp_matter::console::init();
 #endif
 
-    // Crear task para detectar ESP01 y agregar endpoint dinámicamente
+    // Crear task para detectar ESP01 y agregar endpoint dinámicament
     xTaskCreate(udp_task, "udp_task", 4096, node, 5, NULL);
 }
