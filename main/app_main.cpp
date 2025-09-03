@@ -99,6 +99,28 @@ static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint
 // Task FreeRTOS para escuchar broadcast del ESP01
 static endpoint_t *dynamic_ep = nullptr;
 
+struct esp01_info_t
+{
+    endpoint_t *ep;
+    time_t last_seen;
+    bool reachable;
+};
+
+static std::map<std::string, esp01_info_t> esp01_map;
+
+std::string map_str_from_map(const std::map<std::string, esp01_info_t> &map)
+{
+    std::string s;
+    for (auto &entry : map)
+    {
+        if (entry.second.ep)
+            s += entry.first + ":" + std::to_string(endpoint::get_id(entry.second.ep)) + "," + (entry.second.reachable ? "1" : "0") + ",";
+    }
+    if (!s.empty())
+        s.pop_back();
+    return s;
+}
+
 void udp_task(void *pvParameters)
 {
     node_t *node = (node_t *)pvParameters;
@@ -129,45 +151,12 @@ void udp_task(void *pvParameters)
     struct sockaddr_in source_addr;
     socklen_t socklen = sizeof(source_addr);
 
-    static std::map<std::string, time_t> esp01_last_seen;
-    static std::map<std::string, endpoint_t *> esp01_endpoints;
+    static std::map<std::string, esp01_info_t> esp01_map;
 
     // Inicializar NVS
     nvs_flash_init();
     nvs_handle_t nvs_handle;
     nvs_open("esp01", NVS_READWRITE, &nvs_handle);
-
-    // Recuperar endpoints guardados en NVS
-    size_t required_size = 0;
-    nvs_get_str(nvs_handle, "device_map", nullptr, &required_size);
-    if (required_size > 0)
-    {
-        char *data = new char[required_size];
-        if (nvs_get_str(nvs_handle, "device_map", data, &required_size) == ESP_OK)
-        {
-            std::string map_str(data);
-            // map_str tiene formato: UID1:EP1,UID2:EP2,...
-            size_t start = 0;
-            while (start < map_str.size())
-            {
-                size_t sep = map_str.find(':', start);
-                size_t end = map_str.find(',', start);
-                if (end == std::string::npos) end = map_str.size();
-                std::string uid = map_str.substr(start, sep - start);
-                uint16_t ep_id = atoi(map_str.substr(sep + 1, end - sep - 1).c_str());
-                endpoint_t *ep = endpoint::get(node, ep_id);
-                if (ep)
-                {
-                    endpoint::enable(ep);
-                    esp01_endpoints[uid] = ep;
-                    ESP_LOGI(TAG, "Endpoint recuperado: UID=%s, EP=%d", uid.c_str(), ep_id);
-                }
-                start = end + 1;
-            }
-        }
-        delete[] data;
-    }
-    nvs_close(nvs_handle);
 
     while (true)
     {
@@ -179,17 +168,12 @@ void udp_task(void *pvParameters)
             std::string device_id(buf);
             ESP_LOGI(TAG, "ESP01 detectado: %s", buf);
 
-            esp01_last_seen[device_id] = now;
+            auto &info = esp01_map[device_id];
+            info.last_seen = now;
 
-            endpoint_t *ep = nullptr;
-            auto it = esp01_endpoints.find(device_id);
-            if (it != esp01_endpoints.end())
-            {
-                // Endpoint existente: marcar reachable
-                ep = it->second;
-                set_reachable(endpoint::get_id(ep), true);
-            }
-            else
+            endpoint_t *ep = info.ep;
+
+            if (!ep)
             {
                 // Crear nuevo endpoint
                 on_off_plugin_unit::config_t on_off_plugin_unit_config;
@@ -206,41 +190,57 @@ void udp_task(void *pvParameters)
                     cluster::bridged_device_basic_information::create(ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
 
                     endpoint::enable(ep);
-                    esp01_endpoints[device_id] = ep;
+                    info.ep = ep;
+                    info.reachable = true;
 
-                    // Guardar mapping en NVS
-                    nvs_open("esp01", NVS_READWRITE, &nvs_handle);
+                    // Guardar en NVS
                     std::string map_str;
-                    for (auto &entry : esp01_endpoints)
+                    for (auto &entry : esp01_map)
                     {
-                        map_str += entry.first + ":" + std::to_string(endpoint::get_id(entry.second)) + ",";
+                        if (entry.second.ep)
+                        {
+                            map_str += entry.first + ":" + std::to_string(endpoint::get_id(entry.second.ep)) + "," + (entry.second.reachable ? "1" : "0") + ",";
+                        }
                     }
-                    if (!map_str.empty()) map_str.pop_back();
+                    if (!map_str.empty())
+                        map_str.pop_back();
                     nvs_set_str(nvs_handle, "device_map", map_str.c_str());
                     nvs_commit(nvs_handle);
-                    nvs_close(nvs_handle);
 
                     ESP_LOGI(TAG, "Nuevo endpoint creado: UID=%s, EP=%d", device_id.c_str(), ep_id);
                 }
             }
+            else if (!info.reachable)
+            {
+                info.reachable = true;
+                set_reachable(endpoint::get_id(ep), true);
+                ESP_LOGI(TAG, "ESP01 REACTIVADO: %s", device_id.c_str());
+
+                // Guardar flag en NVS
+                nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
+                nvs_commit(nvs_handle);
+            }
         }
 
         // Revisar dispositivos offline
-        for (auto &entry : esp01_last_seen)
+        for (auto &entry : esp01_map)
         {
-            if (now - entry.second > 10000)
+            if (entry.second.ep && entry.second.reachable && now - entry.second.last_seen > 10000)
             {
-                endpoint_t *ep = esp01_endpoints[entry.first];
-                if (ep)
-                {
-                    set_reachable(endpoint::get_id(ep), false);
-                    ESP_LOGI(TAG, "ESP01 OFFLINE: %s, endpoint desactivado", entry.first.c_str());
-                }
+                entry.second.reachable = false;
+                set_reachable(endpoint::get_id(entry.second.ep), false);
+                ESP_LOGI(TAG, "ESP01 OFFLINE: %s, endpoint desactivado", entry.first.c_str());
+
+                // Guardar flag en NVS
+                nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
+                nvs_commit(nvs_handle);
             }
         }
 
         vTaskDelay(500 / portTICK_PERIOD_MS);
     }
+
+    nvs_close(nvs_handle);
 }
 
 extern "C" void app_main()
