@@ -13,7 +13,6 @@
 
 #define BROADCAST_PORT 12345
 #define BUF_SIZE 128
-static const char *UTAG = "UDP_DETECT";
 
 #include <esp_matter.h>
 #include <esp_matter_console.h>
@@ -30,8 +29,6 @@ using namespace esp_matter::attribute;
 using namespace esp_matter::endpoint;
 using namespace esp_matter::cluster;
 
-static bool endpoint_created = false; // flag para crear solo una vez
-
 esp_err_t set_reachable(uint16_t endpoint_id, bool reachable)
 {
     attribute_t *attr = attribute::get(endpoint_id,
@@ -46,7 +43,7 @@ esp_err_t set_reachable(uint16_t endpoint_id, bool reachable)
 
     esp_matter_attr_val_t val = esp_matter_bool(reachable);
     attribute::set_val(attr, &val);
-    esp_err_t err = attribute::report(
+    attribute::report(
         endpoint_id,
         chip::app::Clusters::BridgedDeviceBasicInformation::Id,
         chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::Reachable::Id,
@@ -97,7 +94,6 @@ static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint
 }
 
 // Task FreeRTOS para escuchar broadcast del ESP01
-static endpoint_t *dynamic_ep = nullptr;
 
 struct esp01_info_t
 {
