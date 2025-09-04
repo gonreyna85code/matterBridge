@@ -1,8 +1,3 @@
-/*
-   Este código mantiene todas tus funcionalidades existentes
-   y agrega la creación dinámica del endpoint On/Off al detectar un ESP01 en la red.
-*/
-
 #include <esp_err.h>
 #include <esp_log.h>
 #include <nvs.h>
@@ -247,6 +242,7 @@ void udp_task(void *pvParameters)
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &source_addr.sin_addr, ip_str, sizeof(ip_str));
         std::string ip(ip_str);
+
         if (len > 0)
         {
             buf[len] = 0;
@@ -275,6 +271,7 @@ void udp_task(void *pvParameters)
                 info.last_seen = now;
                 info.ip = ip;
 
+                // Crear endpoint dinámico
                 on_off_plugin_unit::config_t on_off_plugin_unit_config;
                 endpoint_t *ep = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
                 if (!ep)
@@ -284,11 +281,13 @@ void udp_task(void *pvParameters)
                 }
 
                 uint16_t ep_id = endpoint::get_id(ep);
+
                 cluster::on_off::config_t onoff_cfg{};
                 cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
                 cluster::bridged_device_basic_information::config_t basic_info_cfg{};
                 cluster::bridged_device_basic_information::create(ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
 
+                // Configurar NodeLabel con UID
                 attribute_t *node_label_attr = attribute::get(
                     ep_id,
                     chip::app::Clusters::BridgedDeviceBasicInformation::Id,
