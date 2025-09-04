@@ -12,6 +12,7 @@
 #include <string>
 
 #define BROADCAST_PORT 12345
+#define COMMANDS_PORT 12346
 #define BUF_SIZE 128
 
 #include <esp_matter.h>
@@ -85,23 +86,52 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     }
 }
 
-static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
+struct esp01_cmd_t
 {
-    esp_err_t err = ESP_OK;
-    if (type == PRE_UPDATE)
-    {
-        ESP_LOGI(TAG, "Pre update of Endpoint 0x%x Cluster 0x%lx attribute_id 0x%lx", endpoint_id, cluster_id, attribute_id);
-    }
-    return err;
-}
+    std::string ip;
+    std::string payload;
+};
 
-// Task FreeRTOS para escuchar broadcast del ESP01
+void esp01_cmd_task(void *pvParameters)
+{
+    esp01_cmd_t *cmd = (esp01_cmd_t *)pvParameters;
+
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0)
+    {
+        ESP_LOGE(TAG, "No se pudo crear socket para enviar comando");
+        delete cmd;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(COMMANDS_PORT);
+    inet_pton(AF_INET, cmd->ip.c_str(), &dest_addr.sin_addr);
+
+    int sent = sendto(sock, cmd->payload.c_str(), cmd->payload.size(), 0,
+                      (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (sent < 0)
+    {
+        ESP_LOGE(TAG, "Error enviando comando a %s", cmd->ip.c_str());
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Comando enviado a %s: %s", cmd->ip.c_str(), cmd->payload.c_str());
+    }
+
+    close(sock);
+    delete cmd; // liberar memoria
+    vTaskDelete(NULL);
+}
 
 struct esp01_info_t
 {
     endpoint_t *ep;
     time_t last_seen;
     bool reachable;
+    std::string ip;
 };
 
 static std::map<std::string, esp01_info_t> esp01_map;
@@ -117,6 +147,60 @@ std::string map_str_from_map(const std::map<std::string, esp01_info_t> &map)
     if (!s.empty())
         s.pop_back();
     return s;
+}
+
+void send_command_to_esp01(const std::string &device_id, const std::string &payload)
+{
+    if (xSemaphoreTake(esp01_mutex, portMAX_DELAY) == pdTRUE)
+    {
+        auto it = esp01_map.find(device_id);
+        if (it != esp01_map.end() && it->second.reachable)
+        {
+            esp01_cmd_t *cmd = new esp01_cmd_t{it->second.ip, payload};
+            xTaskCreate(esp01_cmd_task, "esp01_cmd_task", 4096, cmd, 5, NULL);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "No se encontró dispositivo %s o no está reachable", device_id.c_str());
+        }
+        xSemaphoreGive(esp01_mutex);
+    }
+}
+
+static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
+{
+    esp_err_t err = ESP_OK;
+
+    if (type == PRE_UPDATE)
+    {
+        ESP_LOGI(TAG, "Pre update Endpoint=0x%x Cluster=0x%lx Attr=0x%lx",
+                 endpoint_id, cluster_id, attribute_id);
+
+        if (cluster_id == chip::app::Clusters::OnOff::Id &&
+            attribute_id == chip::app::Clusters::OnOff::Attributes::OnOff::Id)
+        {
+
+            bool new_state = val->val.b;
+            ESP_LOGI(TAG, "OnOff -> %s", new_state ? "ON" : "OFF");
+
+            for (auto &entry : esp01_map)
+            {
+                if (entry.second.ep &&
+                    endpoint::get_id(entry.second.ep) == endpoint_id &&
+                    entry.second.reachable)
+                {
+
+                    ESP_LOGI(TAG, "Match endpoint %d -> mando a %s",
+                             endpoint_id, entry.first.c_str());
+
+                    send_command_to_esp01(entry.first, new_state ? "ON" : "OFF");
+                    break;
+                }
+            }
+        }
+    }
+
+    return err;
 }
 
 void udp_task(void *pvParameters)
@@ -160,6 +244,9 @@ void udp_task(void *pvParameters)
     {
         time_t now = esp_timer_get_time() / 1000; // ms
         int len = recvfrom(sock, buf, BUF_SIZE - 1, 0, (struct sockaddr *)&source_addr, &socklen);
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &source_addr.sin_addr, ip_str, sizeof(ip_str));
+        std::string ip(ip_str);
         if (len > 0)
         {
             buf[len] = 0;
@@ -172,6 +259,7 @@ void udp_task(void *pvParameters)
                 if (it != esp01_map.end() && it->second.ep != nullptr)
                 {
                     it->second.last_seen = now;
+                    it->second.ip = ip;
                     if (!it->second.reachable)
                     {
                         it->second.reachable = true;
@@ -185,6 +273,7 @@ void udp_task(void *pvParameters)
                 // Nuevo dispositivo
                 esp01_info_t &info = esp01_map[device_id];
                 info.last_seen = now;
+                info.ip = ip;
 
                 on_off_plugin_unit::config_t on_off_plugin_unit_config;
                 endpoint_t *ep = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
@@ -217,6 +306,7 @@ void udp_task(void *pvParameters)
 
                 endpoint::enable(ep);
                 info.ep = ep;
+                info.ip = ip;
                 info.reachable = true;
 
                 nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
@@ -252,11 +342,11 @@ void udp_task(void *pvParameters)
     nvs_close(nvs_handle);
 }
 
-
 void restore_endpoints(node_t *node)
 {
     nvs_handle_t nvs_handle;
-    if (nvs_open("esp01", NVS_READWRITE, &nvs_handle) != ESP_OK) return;
+    if (nvs_open("esp01", NVS_READWRITE, &nvs_handle) != ESP_OK)
+        return;
 
     size_t required_size = 0;
     if (nvs_get_str(nvs_handle, "device_map", nullptr, &required_size) != ESP_OK || required_size == 0)
@@ -266,20 +356,22 @@ void restore_endpoints(node_t *node)
     if (nvs_get_str(nvs_handle, "device_map", buf.data(), &required_size) != ESP_OK)
         return;
 
-    const char* str = buf.data();
+    const char *str = buf.data();
     while (*str)
     {
-        const char* colon = strchr(str, ':');
-        if (!colon) break;
+        const char *colon = strchr(str, ':');
+        if (!colon)
+            break;
 
         std::string uid(str, colon - str);
 
-        const char* comma = strchr(colon + 1, ',');
-        if (!comma) break;
+        const char *comma = strchr(colon + 1, ',');
+        if (!comma)
+            break;
 
         uint16_t ep_id = atoi(std::string(colon + 1, comma - (colon + 1)).c_str());
 
-        const char* next_comma = strchr(comma + 1, ',');
+        const char *next_comma = strchr(comma + 1, ',');
         bool reachable = *(comma + 1) == '1';
 
         // Evitar duplicados
@@ -287,14 +379,19 @@ void restore_endpoints(node_t *node)
         {
             esp01_map[uid].reachable = reachable;
             esp01_map[uid].last_seen = esp_timer_get_time() / 1000;
-            if (!reachable) set_reachable(ep_id, false);
+            if (!reachable)
+                set_reachable(ep_id, false);
         }
         else
         {
             // Crear endpoint solo si no existe
             on_off_plugin_unit::config_t cfg{};
             endpoint_t *ep = on_off_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-            if (!ep) { str = next_comma ? next_comma + 1 : comma + 1; continue; }
+            if (!ep)
+            {
+                str = next_comma ? next_comma + 1 : comma + 1;
+                continue;
+            }
 
             uint16_t new_ep_id = endpoint::get_id(ep);
 
@@ -309,7 +406,7 @@ void restore_endpoints(node_t *node)
                                                           chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
             if (node_label_attr)
             {
-                esp_matter_attr_val_t val = esp_matter_char_str((char*)uid.c_str(), uid.size());
+                esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
                 attribute::set_val(node_label_attr, &val);
                 attribute::report(new_ep_id,
                                   chip::app::Clusters::BridgedDeviceBasicInformation::Id,
@@ -319,7 +416,8 @@ void restore_endpoints(node_t *node)
 
             endpoint::enable(ep);
             esp01_map[uid] = {ep, esp_timer_get_time() / 1000, reachable};
-            if (!reachable) set_reachable(new_ep_id, false);
+            if (!reachable)
+                set_reachable(new_ep_id, false);
         }
 
         // Avanzar al siguiente
@@ -329,7 +427,6 @@ void restore_endpoints(node_t *node)
 
     nvs_close(nvs_handle);
 }
-
 
 extern "C" void app_main()
 {
