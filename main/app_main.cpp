@@ -5,28 +5,25 @@
 #include <lwip/sockets.h>
 #include <map>
 #include <string>
-
-#define BROADCAST_PORT 12345
-#define COMMANDS_PORT 12346
-#define BUF_SIZE 128
-
 #include <esp_matter.h>
 #include <esp_matter_console.h>
 #include <esp_matter_ota.h>
 #include <esp_matter_console_bridge.h>
-
 #include <common_macros.h>
 #include <freertos/semphr.h>
-
-static SemaphoreHandle_t esp01_mutex = nullptr;
-
-static const char *TAG = "app_main";
-uint16_t on_off_plugin_unit_endpoint_id = 0;
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
 using namespace esp_matter::endpoint;
 using namespace esp_matter::cluster;
+
+#define BROADCAST_PORT 12345
+#define COMMANDS_PORT 12346
+#define BUF_SIZE 256
+
+static SemaphoreHandle_t esp01_mutex = nullptr;
+static const char *TAG = "app_main";
+uint16_t on_off_plugin_unit_endpoint_id = 0;
 
 esp_err_t set_reachable(uint16_t endpoint_id, bool reachable)
 {
@@ -213,13 +210,11 @@ void udp_task(void *pvParameters)
         return;
     }
 
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = htons(BROADCAST_PORT);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
         ESP_LOGE(TAG, "No se pudo bindear el socket");
@@ -232,168 +227,189 @@ void udp_task(void *pvParameters)
     struct sockaddr_in source_addr;
     socklen_t socklen = sizeof(source_addr);
 
-    nvs_handle_t nvs_handle;
-    nvs_open("esp01", NVS_READWRITE, &nvs_handle);
+    const int OFFLINE_TIMEOUT_MS = 120000; // 2 minutos
 
     while (true)
     {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(sock, &rfds);
+
+        struct timeval tv;
+        tv.tv_sec = 60;
+        tv.tv_usec = 0;
+
+        int ret = select(sock + 1, &rfds, NULL, NULL, &tv);
+
         time_t now = esp_timer_get_time() / 1000; // ms
-        int len = recvfrom(sock, buf, BUF_SIZE - 1, 0, (struct sockaddr *)&source_addr, &socklen);
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &source_addr.sin_addr, ip_str, sizeof(ip_str));
-        std::string ip(ip_str);
 
-        if (len > 0)
+        // --- Procesar paquete si llegó ---
+        if (ret > 0 && FD_ISSET(sock, &rfds))
         {
-            buf[len] = 0;
-            std::string device_id(buf);
-            ESP_LOGI(TAG, "ESP01 detectado: %s", buf);
-
-            if (xSemaphoreTake(esp01_mutex, portMAX_DELAY) == pdTRUE)
+            int len = recvfrom(sock, buf, BUF_SIZE - 1, 0,
+                               (struct sockaddr *)&source_addr, &socklen);
+            if (len > 0)
             {
-                auto it = esp01_map.find(device_id);
-                if (it != esp01_map.end() && it->second.ep != nullptr)
+                buf[len] = 0;
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &source_addr.sin_addr, ip_str, sizeof(ip_str));
+                std::string ip(ip_str);
+                std::string device_id(buf);
+
+                ESP_LOGI(TAG, "ESP01 detectado: %s", buf);
+
+                if (xSemaphoreTake(esp01_mutex, portMAX_DELAY) == pdTRUE)
                 {
-                    it->second.last_seen = now;
-                    it->second.ip = ip;
-                    if (!it->second.reachable)
+                    auto it = esp01_map.find(device_id);
+                    if (it != esp01_map.end() && it->second.ep != nullptr)
                     {
-                        it->second.reachable = true;
-                        set_reachable(endpoint::get_id(it->second.ep), true);
-                        ESP_LOGI(TAG, "ESP01 REACTIVADO: %s", device_id.c_str());
+                        it->second.last_seen = now;
+                        it->second.ip = ip;
+                        if (!it->second.reachable)
+                        {
+                            it->second.reachable = true;
+                            set_reachable(endpoint::get_id(it->second.ep), true);
+
+                            attribute_t *onoff_attr = attribute::get(
+                                endpoint::get_id(it->second.ep),
+                                chip::app::Clusters::OnOff::Id,
+                                chip::app::Clusters::OnOff::Attributes::OnOff::Id);
+
+                            if (onoff_attr)
+                            {
+                                esp_matter_attr_val_t val = esp_matter_bool(false);
+                                attribute::set_val(onoff_attr, &val);
+                                attribute::report(endpoint::get_id(it->second.ep),
+                                                  chip::app::Clusters::OnOff::Id,
+                                                  chip::app::Clusters::OnOff::Attributes::OnOff::Id,
+                                                  &val);
+                            }
+                            ESP_LOGI(TAG, "ESP01 REACTIVADO: %s", device_id.c_str());
+                        }
+                        xSemaphoreGive(esp01_mutex);
+                        continue;
+                    }
+
+                    // --- Nuevo dispositivo ---
+                    nvs_handle_t nvs_handle;
+                    if (nvs_open("esp01", NVS_READWRITE, &nvs_handle) == ESP_OK)
+                    {
+                        esp01_info_t &info = esp01_map[device_id];
+                        info.last_seen = now;
+                        info.ip = ip;
+
+                        on_off_plugin_unit::config_t on_off_plugin_unit_config;
+                        endpoint_t *ep = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                        if (ep)
+                        {
+                            uint16_t ep_id = endpoint::get_id(ep);
+
+                            cluster::on_off::config_t onoff_cfg{};
+                            cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
+
+                            cluster::bridged_device_basic_information::config_t basic_info_cfg{};
+                            cluster::bridged_device_basic_information::create(ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
+
+                            attribute_t *node_label_attr = attribute::get(
+                                ep_id,
+                                chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+                                chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
+
+                            if (node_label_attr)
+                            {
+                                esp_matter_attr_val_t val = esp_matter_char_str((char *)device_id.c_str(), device_id.size());
+                                attribute::set_val(node_label_attr, &val);
+                                attribute::report(ep_id,
+                                                  chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+                                                  chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
+                                                  &val);
+                            }
+
+                            endpoint::enable(ep);
+                            info.ep = ep;
+                            info.reachable = true;
+
+                            nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
+                            nvs_commit(nvs_handle);
+
+                            ESP_LOGI(TAG, "Nuevo endpoint creado: UID=%s, EP=%d", device_id.c_str(), ep_id);
+                        }
+                        nvs_close(nvs_handle);
                     }
                     xSemaphoreGive(esp01_mutex);
-                    continue;
                 }
-
-                // Nuevo dispositivo
-                esp01_info_t &info = esp01_map[device_id];
-                info.last_seen = now;
-                info.ip = ip;
-
-                // Crear endpoint dinámico
-                on_off_plugin_unit::config_t on_off_plugin_unit_config;
-                endpoint_t *ep = on_off_plugin_unit::create(node, &on_off_plugin_unit_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                if (!ep)
-                {
-                    xSemaphoreGive(esp01_mutex);
-                    continue;
-                }
-
-                uint16_t ep_id = endpoint::get_id(ep);
-
-                cluster::on_off::config_t onoff_cfg{};
-                cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
-                cluster::bridged_device_basic_information::config_t basic_info_cfg{};
-                cluster::bridged_device_basic_information::create(ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
-
-                // Configurar NodeLabel con UID
-                attribute_t *node_label_attr = attribute::get(
-                    ep_id,
-                    chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                    chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-
-                if (node_label_attr)
-                {
-                    esp_matter_attr_val_t val = esp_matter_char_str((char *)device_id.c_str(), device_id.size());
-                    attribute::set_val(node_label_attr, &val);
-                    attribute::report(ep_id,
-                                      chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                                      chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                                      &val);
-                }
-
-                endpoint::enable(ep);
-                info.ep = ep;
-                info.ip = ip;
-                info.reachable = true;
-
-                nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
-                nvs_commit(nvs_handle);
-
-                ESP_LOGI(TAG, "Nuevo endpoint creado: UID=%s, EP=%d", device_id.c_str(), ep_id);
-
-                xSemaphoreGive(esp01_mutex);
             }
         }
 
-        // Revisar dispositivos offline
+        // --- Revisar dispositivos offline siempre ---
         if (xSemaphoreTake(esp01_mutex, portMAX_DELAY) == pdTRUE)
         {
             for (auto &entry : esp01_map)
             {
-                if (entry.second.ep && entry.second.reachable && now - entry.second.last_seen > 10000)
+                if (entry.second.ep && entry.second.reachable &&
+                    now - entry.second.last_seen > OFFLINE_TIMEOUT_MS)
                 {
                     entry.second.reachable = false;
                     set_reachable(endpoint::get_id(entry.second.ep), false);
-                    ESP_LOGI(TAG, "ESP01 OFFLINE: %s, endpoint desactivado", entry.first.c_str());
-
-                    nvs_set_str(nvs_handle, "device_map", map_str_from_map(esp01_map).c_str());
-                    nvs_commit(nvs_handle);
+                    ESP_LOGI(TAG, "ESP01 OFFLINE: %s", entry.first.c_str());
                 }
             }
             xSemaphoreGive(esp01_mutex);
         }
-
-        vTaskDelay(500 / portTICK_PERIOD_MS);
     }
-
-    nvs_close(nvs_handle);
 }
 
 void restore_endpoints(node_t *node)
 {
     nvs_handle_t nvs_handle;
-    if (nvs_open("esp01", NVS_READWRITE, &nvs_handle) != ESP_OK)
-        return;
+    if (nvs_open("esp01", NVS_READWRITE, &nvs_handle) != ESP_OK) return;
 
     size_t required_size = 0;
-    if (nvs_get_str(nvs_handle, "device_map", nullptr, &required_size) != ESP_OK || required_size == 0)
+    if (nvs_get_str(nvs_handle, "device_map", nullptr, &required_size) != ESP_OK || required_size == 0) {
+        nvs_close(nvs_handle);
         return;
+    }
 
     std::vector<char> buf(required_size);
-    if (nvs_get_str(nvs_handle, "device_map", buf.data(), &required_size) != ESP_OK)
+    if (nvs_get_str(nvs_handle, "device_map", buf.data(), &required_size) != ESP_OK) {
+        nvs_close(nvs_handle);
         return;
+    }
 
     const char *str = buf.data();
-    while (*str)
-    {
+    while (*str) {
         const char *colon = strchr(str, ':');
-        if (!colon)
-            break;
+        if (!colon) break;
 
         std::string uid(str, colon - str);
 
         const char *comma = strchr(colon + 1, ',');
-        if (!comma)
-            break;
+        if (!comma) break;
 
-        uint16_t ep_id = atoi(std::string(colon + 1, comma - (colon + 1)).c_str());
+        std::string ep_str(colon + 1, comma - (colon + 1));
+        char *endptr = nullptr;
+        long ep_id_l = strtol(ep_str.c_str(), &endptr, 10);
+        if (endptr == ep_str.c_str() || ep_id_l <= 0 || ep_id_l > 0xFFFF) {
+            str = comma + 1;
+            continue; // invalid endpoint id, skip
+        }
+        uint16_t ep_id = static_cast<uint16_t>(ep_id_l);
 
         const char *next_comma = strchr(comma + 1, ',');
-        bool reachable = *(comma + 1) == '1';
+        bool reachable = false;
+        if (next_comma) reachable = *(comma + 1) == '1';
+        else reachable = *(comma + 1) == '1'; // last field
 
-        // Evitar duplicados
-        if (esp01_map.find(uid) != esp01_map.end())
-        {
-            esp01_map[uid].reachable = reachable;
-            esp01_map[uid].last_seen = esp_timer_get_time() / 1000;
-            if (!reachable)
-                set_reachable(ep_id, false);
-        }
-        else
-        {
-            // Crear endpoint solo si no existe
+        // Crear endpoint si no existe
+        if (esp01_map.find(uid) == esp01_map.end()) {
             on_off_plugin_unit::config_t cfg{};
             endpoint_t *ep = on_off_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-            if (!ep)
-            {
+            if (!ep) {
                 str = next_comma ? next_comma + 1 : comma + 1;
                 continue;
             }
 
             uint16_t new_ep_id = endpoint::get_id(ep);
-
             cluster::on_off::config_t onoff_cfg{};
             cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
 
@@ -403,8 +419,7 @@ void restore_endpoints(node_t *node)
             attribute_t *node_label_attr = attribute::get(new_ep_id,
                                                           chip::app::Clusters::BridgedDeviceBasicInformation::Id,
                                                           chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-            if (node_label_attr)
-            {
+            if (node_label_attr) {
                 esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
                 attribute::set_val(node_label_attr, &val);
                 attribute::report(new_ep_id,
@@ -415,13 +430,16 @@ void restore_endpoints(node_t *node)
 
             endpoint::enable(ep);
             esp01_map[uid] = {ep, esp_timer_get_time() / 1000, reachable};
-            if (!reachable)
-                set_reachable(new_ep_id, false);
+            if (!reachable) set_reachable(new_ep_id, false);
+        } else {
+            // ya existe
+            esp01_map[uid].reachable = reachable;
+            esp01_map[uid].last_seen = esp_timer_get_time() / 1000;
+            if (!reachable) set_reachable(ep_id, false);
         }
 
-        // Avanzar al siguiente
         str = next_comma ? next_comma + 1 : comma + 1;
-        vTaskDelay(1 / portTICK_PERIOD_MS); // ceder CPU y reset watchdog
+        vTaskDelay(1 / portTICK_PERIOD_MS); // ceder CPU
     }
 
     nvs_close(nvs_handle);
