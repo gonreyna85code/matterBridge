@@ -25,7 +25,7 @@ using namespace esp_matter::cluster;
 #define COMMANDS_PORT 12346
 #define BUF_SIZE 256
 #define SENSOR_TYPE DHT_TYPE_DHT11
-#define DHT11_PIN GPIO_NUM_9
+#define DHT11_PIN GPIO_NUM_1
 
 static SemaphoreHandle_t esp01_mutex = nullptr;
 static const char *TAG = "app_main";
