@@ -11,6 +11,10 @@
 #include <esp_matter_console_bridge.h>
 #include <common_macros.h>
 #include <freertos/semphr.h>
+#include <driver/gpio.h>
+#include <dht.h>
+#include <esp_timer.h>
+#include <esp_rom_sys.h>
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -20,10 +24,18 @@ using namespace esp_matter::cluster;
 #define BROADCAST_PORT 12345
 #define COMMANDS_PORT 12346
 #define BUF_SIZE 256
+#define SENSOR_TYPE DHT_TYPE_DHT11
+#define DHT11_PIN GPIO_NUM_9
 
 static SemaphoreHandle_t esp01_mutex = nullptr;
 static const char *TAG = "app_main";
 uint16_t on_off_plugin_unit_endpoint_id = 0;
+
+struct dht_task_param_t
+{
+    uint16_t temp_ep_id;
+    uint16_t hum_ep_id;
+};
 
 esp_err_t set_reachable(uint16_t endpoint_id, bool reachable)
 {
@@ -362,34 +374,41 @@ void udp_task(void *pvParameters)
 void restore_endpoints(node_t *node)
 {
     nvs_handle_t nvs_handle;
-    if (nvs_open("esp01", NVS_READWRITE, &nvs_handle) != ESP_OK) return;
+    if (nvs_open("esp01", NVS_READWRITE, &nvs_handle) != ESP_OK)
+        return;
 
     size_t required_size = 0;
-    if (nvs_get_str(nvs_handle, "device_map", nullptr, &required_size) != ESP_OK || required_size == 0) {
+    if (nvs_get_str(nvs_handle, "device_map", nullptr, &required_size) != ESP_OK || required_size == 0)
+    {
         nvs_close(nvs_handle);
         return;
     }
 
     std::vector<char> buf(required_size);
-    if (nvs_get_str(nvs_handle, "device_map", buf.data(), &required_size) != ESP_OK) {
+    if (nvs_get_str(nvs_handle, "device_map", buf.data(), &required_size) != ESP_OK)
+    {
         nvs_close(nvs_handle);
         return;
     }
 
     const char *str = buf.data();
-    while (*str) {
+    while (*str)
+    {
         const char *colon = strchr(str, ':');
-        if (!colon) break;
+        if (!colon)
+            break;
 
         std::string uid(str, colon - str);
 
         const char *comma = strchr(colon + 1, ',');
-        if (!comma) break;
+        if (!comma)
+            break;
 
         std::string ep_str(colon + 1, comma - (colon + 1));
         char *endptr = nullptr;
         long ep_id_l = strtol(ep_str.c_str(), &endptr, 10);
-        if (endptr == ep_str.c_str() || ep_id_l <= 0 || ep_id_l > 0xFFFF) {
+        if (endptr == ep_str.c_str() || ep_id_l <= 0 || ep_id_l > 0xFFFF)
+        {
             str = comma + 1;
             continue; // invalid endpoint id, skip
         }
@@ -397,14 +416,18 @@ void restore_endpoints(node_t *node)
 
         const char *next_comma = strchr(comma + 1, ',');
         bool reachable = false;
-        if (next_comma) reachable = *(comma + 1) == '1';
-        else reachable = *(comma + 1) == '1'; // last field
+        if (next_comma)
+            reachable = *(comma + 1) == '1';
+        else
+            reachable = *(comma + 1) == '1'; // last field
 
         // Crear endpoint si no existe
-        if (esp01_map.find(uid) == esp01_map.end()) {
+        if (esp01_map.find(uid) == esp01_map.end())
+        {
             on_off_plugin_unit::config_t cfg{};
             endpoint_t *ep = on_off_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-            if (!ep) {
+            if (!ep)
+            {
                 str = next_comma ? next_comma + 1 : comma + 1;
                 continue;
             }
@@ -419,7 +442,8 @@ void restore_endpoints(node_t *node)
             attribute_t *node_label_attr = attribute::get(new_ep_id,
                                                           chip::app::Clusters::BridgedDeviceBasicInformation::Id,
                                                           chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-            if (node_label_attr) {
+            if (node_label_attr)
+            {
                 esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
                 attribute::set_val(node_label_attr, &val);
                 attribute::report(new_ep_id,
@@ -430,12 +454,16 @@ void restore_endpoints(node_t *node)
 
             endpoint::enable(ep);
             esp01_map[uid] = {ep, esp_timer_get_time() / 1000, reachable};
-            if (!reachable) set_reachable(new_ep_id, false);
-        } else {
+            if (!reachable)
+                set_reachable(new_ep_id, false);
+        }
+        else
+        {
             // ya existe
             esp01_map[uid].reachable = reachable;
             esp01_map[uid].last_seen = esp_timer_get_time() / 1000;
-            if (!reachable) set_reachable(ep_id, false);
+            if (!reachable)
+                set_reachable(ep_id, false);
         }
 
         str = next_comma ? next_comma + 1 : comma + 1;
@@ -443,6 +471,57 @@ void restore_endpoints(node_t *node)
     }
 
     nvs_close(nvs_handle);
+}
+
+void dht_task(void *pvParameter)
+{
+    auto params = (dht_task_param_t *)pvParameter;
+    uint16_t temp_ep_id = params->temp_ep_id;
+    uint16_t hum_ep_id = params->hum_ep_id;
+
+    gpio_set_pull_mode(DHT11_PIN, GPIO_PULLUP_ONLY);
+
+    while (true)
+    {
+        float temperature, humidity;
+
+        if (dht_read_float_data(SENSOR_TYPE, DHT11_PIN, &humidity, &temperature) == ESP_OK)
+        {
+            ESP_LOGI("DHT", "Hum: %.1f%% Tmp: %.1f°C", humidity, temperature);
+
+            // Reportar Humidity
+            if (auto attr = attribute::get(hum_ep_id,
+                                           chip::app::Clusters::RelativeHumidityMeasurement::Id,
+                                           chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id))
+            {
+                esp_matter_attr_val_t val = esp_matter_int16(static_cast<int16_t>(humidity * 100));
+                attribute::set_val(attr, &val);
+                attribute::report(hum_ep_id,
+                                  chip::app::Clusters::RelativeHumidityMeasurement::Id,
+                                  chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id,
+                                  &val);
+            }
+
+            // Reportar Temperature
+            if (auto attr = attribute::get(temp_ep_id,
+                                           chip::app::Clusters::TemperatureMeasurement::Id,
+                                           chip::app::Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Id))
+            {
+                esp_matter_attr_val_t val = esp_matter_int16(static_cast<int16_t>(temperature * 100));
+                attribute::set_val(attr, &val);
+                attribute::report(temp_ep_id,
+                                  chip::app::Clusters::TemperatureMeasurement::Id,
+                                  chip::app::Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Id,
+                                  &val);
+            }
+        }
+        else
+        {
+            ESP_LOGW("DHT", "Failed to read DHT sensor");
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(30000));
+    }
 }
 
 extern "C" void app_main()
@@ -461,6 +540,16 @@ extern "C" void app_main()
     endpoint_t *aggregator = endpoint::aggregator::create(node, &aggregator_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(aggregator != nullptr, ESP_LOGE(TAG, "Failed to create aggregator endpoint"));
 
+    // add temperature sensor device
+    temperature_sensor::config_t temp_sensor_config;
+    endpoint_t *temp_sensor_ep = temperature_sensor::create(node, &temp_sensor_config, ENDPOINT_FLAG_NONE, NULL);
+    ABORT_APP_ON_FAILURE(temp_sensor_ep != nullptr, ESP_LOGE(TAG, "Failed to create temperature_sensor endpoint"));
+
+    // add the humidity sensor device
+    humidity_sensor::config_t humidity_sensor_config;
+    endpoint_t *humidity_sensor_ep = humidity_sensor::create(node, &humidity_sensor_config, ENDPOINT_FLAG_NONE, NULL);
+    ABORT_APP_ON_FAILURE(humidity_sensor_ep != nullptr, ESP_LOGE(TAG, "Failed to create humidity_sensor endpoint"));
+
     /* Restore previously created endpoints */
     restore_endpoints(node);
 
@@ -470,4 +559,6 @@ extern "C" void app_main()
 
     // Crear task para detectar ESP01 y agregar endpoint dinámicament
     xTaskCreate(udp_task, "udp_task", 4096, node, 5, NULL);
+    dht_task_param_t *params = new dht_task_param_t{endpoint::get_id(temp_sensor_ep), endpoint::get_id(humidity_sensor_ep)};
+    xTaskCreate(dht_task, "dht_task", 4096, params, 5, NULL);
 }
