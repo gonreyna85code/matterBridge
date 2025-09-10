@@ -26,10 +26,31 @@ using namespace esp_matter::cluster;
 #define BUF_SIZE 256
 #define SENSOR_TYPE DHT_TYPE_DHT11
 #define DHT11_PIN GPIO_NUM_1
+#define PIN_CLK GPIO_NUM_2
+#define PIN_DT GPIO_NUM_3
+#define PIN_SW GPIO_NUM_5
 
 static SemaphoreHandle_t esp01_mutex = nullptr;
 static const char *TAG = "app_main";
 uint16_t on_off_plugin_unit_endpoint_id = 0;
+uint16_t encoder_endpoint_id = 0;
+volatile int encoder_pos = 0;
+volatile bool encoder_sw_pressed = false;
+static const char *ENC_TAG = "ENCODER";
+
+typedef enum
+{
+    ENC_EVT_ROT_CW,
+    ENC_EVT_ROT_CCW,
+    ENC_EVT_SW_PRESS
+} enc_event_type_t;
+
+typedef struct
+{
+    enc_event_type_t type;
+} enc_event_t;
+
+static QueueHandle_t s_enc_queue = nullptr;
 
 struct dht_task_param_t
 {
@@ -524,6 +545,175 @@ void dht_task(void *pvParameter)
     }
 }
 
+static void IRAM_ATTR encoder_isr_handler(void *arg)
+{
+    uintptr_t gpio_num = (uintptr_t)arg;
+
+    // Si es CLK: determinamos dirección leyendo DT
+    if (gpio_num == PIN_CLK)
+    {
+        int clk = gpio_get_level(PIN_CLK);
+        // Queremos reaccionar en flanco (por ejemplo, flanco descendente)
+        // Simple approach: si clk == 0 -> flanco descendente
+        if (clk == 0)
+        {
+            int dt = gpio_get_level(PIN_DT);
+            enc_event_t ev;
+            if (dt != clk)
+                ev.type = ENC_EVT_ROT_CW;
+            else
+                ev.type = ENC_EVT_ROT_CCW;
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            xQueueSendFromISR(s_enc_queue, &ev, &xHigherPriorityTaskWoken);
+            if (xHigherPriorityTaskWoken)
+                portYIELD_FROM_ISR();
+        }
+        return;
+    }
+
+    // Si es SW: detectar pulsación (falling edge)
+    if (gpio_num == PIN_SW)
+    {
+        // simple debounce: enviar evento y tarea hará debounce final si quiere
+        enc_event_t ev;
+        ev.type = ENC_EVT_SW_PRESS;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xQueueSendFromISR(s_enc_queue, &ev, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken)
+            portYIELD_FROM_ISR();
+        return;
+    }
+}
+
+void encoder_task(void *arg)
+{
+    endpoint_t *encoder_ep = (endpoint_t *)arg;
+    if (!encoder_ep)
+    {
+        ESP_LOGE(ENC_TAG, "encoder_task: endpoint null");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // cola para recibir eventos (ISR -> tarea)
+    s_enc_queue = xQueueCreate(16, sizeof(enc_event_t));
+    if (!s_enc_queue)
+    {
+        ESP_LOGE(ENC_TAG, "No se pudo crear cola");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // configuración GPIO (pullups)
+    gpio_config_t io_conf = {};
+    io_conf.intr_type = GPIO_INTR_NEGEDGE; // flanco descendente por defecto
+    io_conf.pin_bit_mask = (1ULL << PIN_CLK) | (1ULL << PIN_DT) | (1ULL << PIN_SW);
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    gpio_config(&io_conf);
+
+    // instalar servicio de ISR (una sola vez por app)
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(PIN_CLK, encoder_isr_handler, (void *)PIN_CLK);
+    gpio_isr_handler_add(PIN_SW, encoder_isr_handler, (void *)PIN_SW);
+    // NOTA: no necesitamos isr en DT si interpretamos en flanco de CLK
+
+    uint8_t level = 128; // 0..254 Matter CurrentLevel
+    bool onoff = true;
+
+    const TickType_t report_throttle_ticks = pdMS_TO_TICKS(200); // no reportar más seguido de 200ms
+    TickType_t last_report = xTaskGetTickCount();
+
+    enc_event_t ev;
+    while (1)
+    {
+        // espera bloqueante por evento (sin busy-wait -> oke para watchdog)
+        if (xQueueReceive(s_enc_queue, &ev, portMAX_DELAY) == pdTRUE)
+        {
+            bool changed = false;
+
+            switch (ev.type)
+            {
+            case ENC_EVT_ROT_CW:
+                if (level < 254)
+                {
+                    level++;
+                    changed = true;
+                }
+                break;
+            case ENC_EVT_ROT_CCW:
+                if (level > 0)
+                {
+                    level--;
+                    changed = true;
+                }
+                break;
+            case ENC_EVT_SW_PRESS:
+                // botón: debounce simple (esperamos 50ms y verificamos)
+                vTaskDelay(pdMS_TO_TICKS(50));
+                if (gpio_get_level(PIN_SW) == 0)
+                { // sigue presionado
+                    onoff = !onoff;
+                    changed = true;
+                    // consumir rebotes: esperar release
+                    while (gpio_get_level(PIN_SW) == 0)
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                }
+                break;
+            default:
+                break;
+            }
+
+            // si cambió algo, reportarlo (throttle para evitar saturar stack Matter)
+            TickType_t now = xTaskGetTickCount();
+            if (changed && (now - last_report) >= report_throttle_ticks)
+            {
+                last_report = now;
+
+                // Report CurrentLevel (LevelControl cluster)
+                attribute_t *level_attr = attribute::get(
+                    endpoint::get_id(encoder_ep),
+                    chip::app::Clusters::LevelControl::Id,
+                    chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id);
+                if (level_attr)
+                {
+                    esp_matter_attr_val_t val = esp_matter_uint8(level);
+                    attribute::set_val(level_attr, &val);
+                    attribute::report(endpoint::get_id(encoder_ep),
+                                      chip::app::Clusters::LevelControl::Id,
+                                      chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id,
+                                      &val);
+                    ESP_LOGI(ENC_TAG, "Reported level=%d", level);
+                }
+                else
+                {
+                    ESP_LOGW(ENC_TAG, "No level_attr");
+                }
+
+                // Report OnOff (si cambió por botón)
+                attribute_t *onoff_attr = attribute::get(
+                    endpoint::get_id(encoder_ep),
+                    chip::app::Clusters::OnOff::Id,
+                    chip::app::Clusters::OnOff::Attributes::OnOff::Id);
+                if (onoff_attr)
+                {
+                    esp_matter_attr_val_t v = esp_matter_bool(onoff);
+                    attribute::set_val(onoff_attr, &v);
+                    attribute::report(endpoint::get_id(encoder_ep),
+                                      chip::app::Clusters::OnOff::Id,
+                                      chip::app::Clusters::OnOff::Attributes::OnOff::Id,
+                                      &v);
+                    ESP_LOGI(ENC_TAG, "Reported onoff=%d", onoff);
+                }
+                else
+                {
+                    // no pasa nada si no existe atributo
+                }
+            }
+        }
+    }
+}
+
 extern "C" void app_main()
 {
     esp_err_t err = ESP_OK;
@@ -536,20 +726,57 @@ extern "C" void app_main()
     node_t *node = node::create(&node_config, app_attribute_update_cb, NULL);
     ABORT_APP_ON_FAILURE(node != nullptr, ESP_LOGE(TAG, "Failed to create Matter node"));
 
+    // Aggregator
     aggregator::config_t aggregator_config;
     endpoint_t *aggregator = endpoint::aggregator::create(node, &aggregator_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(aggregator != nullptr, ESP_LOGE(TAG, "Failed to create aggregator endpoint"));
 
-    // add temperature sensor device
+    // Temperature sensor
     temperature_sensor::config_t temp_sensor_config;
     endpoint_t *temp_sensor_ep = temperature_sensor::create(node, &temp_sensor_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(temp_sensor_ep != nullptr, ESP_LOGE(TAG, "Failed to create temperature_sensor endpoint"));
 
-    // add the humidity sensor device
+    // Humidity sensor
     humidity_sensor::config_t humidity_sensor_config;
     endpoint_t *humidity_sensor_ep = humidity_sensor::create(node, &humidity_sensor_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(humidity_sensor_ep != nullptr, ESP_LOGE(TAG, "Failed to create humidity_sensor endpoint"));
 
+    // Encoder endpoint (remote dimmer switch)
+    control_bridge::config_t bridge_config{};
+    endpoint_t *ep = control_bridge::create(node, &bridge_config, ENDPOINT_FLAG_NONE, nullptr);
+    if (ep)
+    {
+        uint16_t ep_id = endpoint::get_id(ep);
+        cluster::groups::config_t groups_cfg{};
+        cluster::groups::create(ep, &groups_cfg, CLUSTER_FLAG_SERVER);
+
+        // Cluster OnOff
+        cluster::on_off::config_t onoff_cfg{};
+        cluster::on_off::create(ep, &onoff_cfg, CLUSTER_FLAG_SERVER);
+
+        // Cluster LevelControl
+        cluster::level_control::config_t lvl_cfg{};
+        cluster::level_control::create(ep, &lvl_cfg, CLUSTER_FLAG_SERVER);
+
+        // Cluster BridgedDeviceBasicInformation
+        cluster::bridged_device_basic_information::config_t basic_info_cfg{};
+        cluster::bridged_device_basic_information::create(ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
+
+        // NodeLabel
+        attribute_t *node_label_attr = attribute::get(
+            ep_id,
+            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
+        if (node_label_attr)
+        {
+            esp_matter_attr_val_t val = esp_matter_char_str("DimmerSwitch", strlen("DimmerSwitch"));
+            attribute::set_val(node_label_attr, &val);
+            attribute::report(ep_id,
+                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
+                              &val);
+        }
+    }
     /* Restore previously created endpoints */
     restore_endpoints(node);
 
@@ -557,8 +784,13 @@ extern "C" void app_main()
     err = esp_matter::start(app_event_cb);
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
 
-    // Crear task para detectar ESP01 y agregar endpoint dinámicament
+    // Task UDP
     xTaskCreate(udp_task, "udp_task", 4096, node, 5, NULL);
-    dht_task_param_t *params = new dht_task_param_t{endpoint::get_id(temp_sensor_ep), endpoint::get_id(humidity_sensor_ep)};
+
+    // Task DHT
+    dht_task_param_t *params = new dht_task_param_t{
+        endpoint::get_id(temp_sensor_ep),
+        endpoint::get_id(humidity_sensor_ep)};
     xTaskCreate(dht_task, "dht_task", 4096, params, 5, NULL);
+    xTaskCreate(encoder_task, "encoder_task", 4096, ep, 5, NULL);
 }
