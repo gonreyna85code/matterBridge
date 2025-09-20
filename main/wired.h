@@ -14,10 +14,7 @@ namespace wired
 {
     void pwm_init();
     void set_mosfet(uint8_t level, bool onoff);
-    uint8_t get_last_level();
-    void encoder_init_pins();
-    void start_encoder(esp_matter::endpoint_t *encoder_ep);
-
+    uint8_t get_last_level();    
     constexpr auto DHT_READ_INTERVAL_MS = 30000;
     enum class dht_type_t
     {

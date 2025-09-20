@@ -13,6 +13,7 @@
 #include <freertos/semphr.h>
 #include <esp_timer.h>
 #include <esp_rom_sys.h>
+#include <inttypes.h>
 #include <wired.h>
 #include <bridge.h>
 
@@ -24,7 +25,7 @@ using namespace bridge;
 using namespace wired;
 
 static const char *TAG = "app_main";
-static endpoint_t *encoder_ep_global = nullptr;
+static endpoint_t *led_ep_global = nullptr;
 
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
@@ -58,10 +59,11 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 
 static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
 {
-    if (type != PRE_UPDATE)
-        return ESP_OK;
-
-    uint16_t encoder_id = endpoint::get_id(encoder_ep_global);
+    if (type == PRE_UPDATE) {
+        ESP_LOGI(TAG, "Pre update → Endpoint=0x%X, Cluster=0x%lX, Attribute=0x%lX", 
+                 endpoint_id, cluster_id, attribute_id);        
+    }
+    uint16_t encoder_id = endpoint::get_id(led_ep_global);
 
     if (endpoint_id == encoder_id)
     {
@@ -79,6 +81,11 @@ static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint
 
 extern "C" void app_main()
 {
+    esp_log_level_set("*", ESP_LOG_WARN);
+    esp_log_level_set("app_main", ESP_LOG_INFO);
+    esp_log_level_set("WIRED", ESP_LOG_INFO);
+    esp_log_level_set("BRIDGE", ESP_LOG_INFO);
+
     esp_err_t err = ESP_OK;
     nvs_flash_init();
     // --- Init de tus módulos ---
@@ -101,21 +108,20 @@ extern "C" void app_main()
     cluster::bridged_device_basic_information::create(temp_sensor_ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
     uint16_t ep_id = endpoint::get_id(temp_sensor_ep);
     attribute_t *node_label_attr = attribute::get(
-            ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
+        ep_id,
+        chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+        chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
     if (node_label_attr)
-        {
-            esp_matter_attr_val_t val = esp_matter_char_str("temperature", strlen("temperature"));
-            attribute::set_val(node_label_attr, &val);
-            attribute::report(ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
+    {
+        esp_matter_attr_val_t val = esp_matter_char_str("temperature", strlen("temperature"));
+        attribute::set_val(node_label_attr, &val);
+        attribute::report(ep_id,
+                          chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+                          chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
+                          &val);
+    }
     ABORT_APP_ON_FAILURE(temp_sensor_ep != nullptr, ESP_LOGE(TAG, "Failed to create temperature_sensor endpoint"));
-    
-    
+
     // Humidity sensor
     humidity_sensor::config_t humidity_sensor_config;
     endpoint_t *humidity_sensor_ep = humidity_sensor::create(node, &humidity_sensor_config, ENDPOINT_FLAG_NONE, NULL);
@@ -124,18 +130,18 @@ extern "C" void app_main()
     cluster::bridged_device_basic_information::create(humidity_sensor_ep, &basic_info2_cfg, CLUSTER_FLAG_SERVER);
     uint16_t ep_id2 = endpoint::get_id(humidity_sensor_ep);
     attribute_t *node_label_attr2 = attribute::get(
-            ep_id2,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
+        ep_id2,
+        chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+        chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
     if (node_label_attr2)
-        {
-            esp_matter_attr_val_t val2 = esp_matter_char_str("humidity", strlen("humidity"));
-            attribute::set_val(node_label_attr2, &val2);
-            attribute::report(ep_id2,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val2);
-        }
+    {
+        esp_matter_attr_val_t val2 = esp_matter_char_str("humidity", strlen("humidity"));
+        attribute::set_val(node_label_attr2, &val2);
+        attribute::report(ep_id2,
+                          chip::app::Clusters::BridgedDeviceBasicInformation::Id,
+                          chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
+                          &val2);
+    }
     ABORT_APP_ON_FAILURE(humidity_sensor_ep != nullptr, ESP_LOGE(TAG, "Failed to create humidity_sensor endpoint"));
 
     wired::dht_config_t dht_cfg{
@@ -145,12 +151,12 @@ extern "C" void app_main()
         .hum_ep_id = endpoint::get_id(humidity_sensor_ep)};
     wired::start_dht(&dht_cfg);
 
-    // Encoder endpoint (remote dimmer switch)
+    // Led endpoint (remote dimmer switch)
     dimmable_light::config_t bridge_config{};
     endpoint_t *ep = dimmable_light::create(node, &bridge_config, ENDPOINT_FLAG_NONE, nullptr);
     if (ep)
     {
-        encoder_ep_global = ep;
+        led_ep_global = ep;
         uint16_t ep_id = endpoint::get_id(ep);
 
         // Cluster BridgedDeviceBasicInformation
@@ -179,8 +185,6 @@ extern "C" void app_main()
                               chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
                               &val);
         }
-
-        wired::start_encoder(ep);
     }
 
     /* Restore previously created endpoints */

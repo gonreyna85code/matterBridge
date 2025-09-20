@@ -9,37 +9,17 @@
 using namespace esp_matter;
 using namespace esp_matter::attribute;
 using namespace esp_matter::endpoint;
-using namespace esp_matter::cluster;
+using namespace chip::app::Clusters;
 
 static const char *TAG = "WIRED";
 
 // Pines globales
-const gpio_num_t PIN_CLK = GPIO_NUM_2;
-const gpio_num_t PIN_DT = GPIO_NUM_3;
-const gpio_num_t PIN_SW = GPIO_NUM_5;
 const gpio_num_t MOSFET_PIN = GPIO_NUM_7;
 
 // Variables internas
-static QueueHandle_t s_enc_queue = nullptr;
-static uint8_t s_last_level = 128;
-static endpoint_t *s_encoder_ep = nullptr;
-
-static volatile int8_t clk_last = 0;
-static volatile int8_t dt_last = 0;
-static volatile TickType_t sw_last_tick = 0;
-static const TickType_t DEBOUNCE_MS = pdMS_TO_TICKS(50);
-
-typedef enum
-{
-    ENC_EVT_ROT_CW,
-    ENC_EVT_ROT_CCW,
-    ENC_EVT_SW_PRESS
-} enc_event_type_t;
-
-typedef struct
-{
-    enc_event_type_t type;
-} enc_event_t;
+static bool g_onoff = false;
+static uint8_t g_level = 128;
+static uint8_t last_nonzero_level = 128;
 
 // ------------------------------------------------------------------
 // PWM / MOSFET
@@ -66,18 +46,22 @@ namespace wired
 
     void set_mosfet(uint8_t level, bool onoff)
     {
+        static int last_duty = -1;
         int duty = onoff ? (level * 1023) / 254 : 0;
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
-        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-        ESP_LOGI(TAG, "set_mosfet level=%d onoff=%d duty=%d", level, onoff, duty);
+
+        if (duty != last_duty)
+        {
+            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+            ESP_LOGI(TAG, "set_mosfet level=%d onoff=%d duty=%d", level, onoff, duty);
+            last_duty = duty;
+        }
     }
 
     uint8_t get_last_level()
     {
-        return s_last_level;
+        return g_level;
     }
-
-    static const char *TAG = "wired_dht";
 
     struct dht_instance_t
     {
@@ -95,29 +79,29 @@ namespace wired
             ESP_LOGI(TAG, "Hum: %.1f%% Temp: %.1f°C", h, t);
 
             // Temperature
-            if (auto attr = esp_matter::attribute::get(inst->cfg.temp_ep_id,
-                                                       chip::app::Clusters::TemperatureMeasurement::Id,
-                                                       chip::app::Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Id))
+            if (auto attr = attribute::get(inst->cfg.temp_ep_id,
+                                           chip::app::Clusters::TemperatureMeasurement::Id,
+                                           chip::app::Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Id))
             {
                 esp_matter_attr_val_t val = esp_matter_int16(static_cast<int16_t>(t * 100));
-                esp_matter::attribute::set_val(attr, &val);
-                esp_matter::attribute::report(inst->cfg.temp_ep_id,
-                                              chip::app::Clusters::TemperatureMeasurement::Id,
-                                              chip::app::Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Id,
-                                              &val);
+                attribute::set_val(attr, &val);
+                attribute::report(inst->cfg.temp_ep_id,
+                                  chip::app::Clusters::TemperatureMeasurement::Id,
+                                  chip::app::Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Id,
+                                  &val);
             }
 
             // Humidity
-            if (auto attr = esp_matter::attribute::get(inst->cfg.hum_ep_id,
-                                                       chip::app::Clusters::RelativeHumidityMeasurement::Id,
-                                                       chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id))
+            if (auto attr = attribute::get(inst->cfg.hum_ep_id,
+                                           chip::app::Clusters::RelativeHumidityMeasurement::Id,
+                                           chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id))
             {
                 esp_matter_attr_val_t val = esp_matter_int16(static_cast<int16_t>(h * 100));
-                esp_matter::attribute::set_val(attr, &val);
-                esp_matter::attribute::report(inst->cfg.hum_ep_id,
-                                              chip::app::Clusters::RelativeHumidityMeasurement::Id,
-                                              chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id,
-                                              &val);
+                attribute::set_val(attr, &val);
+                attribute::report(inst->cfg.hum_ep_id,
+                                  chip::app::Clusters::RelativeHumidityMeasurement::Id,
+                                  chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id,
+                                  &val);
             }
         }
         else
@@ -143,247 +127,50 @@ namespace wired
     }
 }
 
-// ------------------------------------------------------------------
-// Encoder ISR / Task
-// ------------------------------------------------------------------
-static void IRAM_ATTR encoder_isr_handler(void *arg)
-{
-    uintptr_t gpio_num = (uintptr_t)arg;
-    if (!s_enc_queue)
-        return;
-
-    if (gpio_num == PIN_CLK || gpio_num == PIN_DT)
-    {
-        int clk = gpio_get_level(PIN_CLK);
-        int dt = gpio_get_level(PIN_DT);
-
-        if (clk != clk_last)
-        {
-            enc_event_t ev;
-            ev.type = (clk_last == dt) ? ENC_EVT_ROT_CW : ENC_EVT_ROT_CCW;
-            BaseType_t hpw = pdFALSE;
-            xQueueSendFromISR(s_enc_queue, &ev, &hpw);
-            if (hpw)
-                portYIELD_FROM_ISR();
-        }
-        clk_last = clk;
-        dt_last = dt;
-        return;
-    }
-
-    if (gpio_num == PIN_SW)
-    {
-        TickType_t now = xTaskGetTickCountFromISR();
-        if ((now - sw_last_tick) > DEBOUNCE_MS)
-        {
-            enc_event_t ev = {ENC_EVT_SW_PRESS};
-            BaseType_t hpw = pdFALSE;
-            xQueueSendFromISR(s_enc_queue, &ev, &hpw);
-            if (hpw)
-                portYIELD_FROM_ISR();
-            sw_last_tick = now;
-        }
-    }
-}
-
-static void encoder_task(void *arg)
-{
-    if (!s_encoder_ep)
-    {
-        ESP_LOGE(TAG, "encoder_task: endpoint null");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    enc_event_t ev;
-    while (true)
-    {
-        if (xQueueReceive(s_enc_queue, &ev, pdMS_TO_TICKS(20)) == pdTRUE)
-        {
-            bool level_changed = false;
-
-            attribute_t *onoff_attr = attribute::get(
-                endpoint::get_id(s_encoder_ep),
-                chip::app::Clusters::OnOff::Id,
-                chip::app::Clusters::OnOff::Attributes::OnOff::Id);
-
-            bool current_onoff = true;
-            if (onoff_attr)
-            {
-                esp_matter_attr_val_t v;
-                attribute::get_val(onoff_attr, &v);
-                current_onoff = v.val.b;
-            }
-
-            switch (ev.type)
-            {
-            case ENC_EVT_ROT_CW:
-                if (s_last_level < 254)
-                {
-                    s_last_level = std::min<uint8_t>(254, s_last_level + 8);
-                    level_changed = true;
-                }
-                break;
-            case ENC_EVT_ROT_CCW:
-                if (s_last_level > 0)
-                {
-                    s_last_level = (s_last_level >= 8) ? s_last_level - 8 : 0;
-                    level_changed = true;
-                }
-                break;
-            case ENC_EVT_SW_PRESS:
-                if (onoff_attr)
-                {
-                    esp_matter_attr_val_t val = esp_matter_bool(!current_onoff);
-                    attribute::set_val(onoff_attr, &val);
-                    attribute::report(endpoint::get_id(s_encoder_ep),
-                                      chip::app::Clusters::OnOff::Id,
-                                      chip::app::Clusters::OnOff::Attributes::OnOff::Id,
-                                      &val);
-                    current_onoff = val.val.b;
-                    ESP_LOGI(TAG, "Botón -> nuevo onoff=%d", current_onoff);
-                    wired::set_mosfet(s_last_level, current_onoff);
-                }
-                break;
-            }
-
-            if (level_changed)
-            {
-                attribute_t *level_attr = attribute::get(
-                    endpoint::get_id(s_encoder_ep),
-                    chip::app::Clusters::LevelControl::Id,
-                    chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id);
-                if (level_attr)
-                {
-                    esp_matter_attr_val_t val = esp_matter_uint8(s_last_level);
-                    attribute::set_val(level_attr, &val);
-                    attribute::report(endpoint::get_id(s_encoder_ep),
-                                      chip::app::Clusters::LevelControl::Id,
-                                      chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id,
-                                      &val);
-                    ESP_LOGI(TAG, "Encoder nivel -> %d", s_last_level);
-                }
-
-                if (onoff_attr && s_last_level == 0 && current_onoff)
-                {
-                    esp_matter_attr_val_t val = esp_matter_bool(false);
-                    attribute::set_val(onoff_attr, &val);
-                    attribute::report(endpoint::get_id(s_encoder_ep),
-                                      chip::app::Clusters::OnOff::Id,
-                                      chip::app::Clusters::OnOff::Attributes::OnOff::Id,
-                                      &val);
-                    ESP_LOGI(TAG, "Auto-off por nivel 0");
-                    wired::set_mosfet(s_last_level, false);
-                }
-                else
-                {
-                    wired::set_mosfet(s_last_level, current_onoff);
-                }
-            }
-        }
-    }
-}
-
 // --------------------- Handler de updates de atributos ---------------------
 esp_err_t wired::handle_attribute_update(uint16_t endpoint_id,
-                                 uint32_t cluster_id,
-                                 uint32_t attribute_id,
-                                 esp_matter_attr_val_t *val)
+                                         uint32_t cluster_id,
+                                         uint32_t attribute_id,
+                                         esp_matter_attr_val_t *val)
 {
-    esp_err_t ret = ESP_OK; 
-    if (!s_encoder_ep || endpoint_id != endpoint::get_id(s_encoder_ep))
-        return ESP_ERR_NOT_FOUND;
+    if (!val) return ESP_ERR_INVALID_ARG;
+
+    bool update_needed = false;
+
+    // --- On/Off cluster ---
     if (cluster_id == chip::app::Clusters::OnOff::Id &&
-        attribute_id == chip::app::Clusters::OnOff::Attributes::OnOff::Id &&
-        val->type == ESP_MATTER_VAL_TYPE_BOOLEAN)
+        attribute_id == chip::app::Clusters::OnOff::Attributes::OnOff::Id)
     {
-        bool onoff = val->val.b;
-        ESP_LOGI(TAG, "OnOff update -> %d", onoff);
-        wired::set_mosfet(s_last_level, onoff);
+        g_onoff = val->val.b;
+
+        // Si encendemos y el nivel actual es 0, restauramos el último nivel válido
+        if (g_onoff && g_level == 0)
+            g_level = last_nonzero_level;
+
+        update_needed = true;
     }
+
+    // --- LevelControl cluster ---
     else if (cluster_id == chip::app::Clusters::LevelControl::Id &&
-             attribute_id == chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id &&
-             val->type == ESP_MATTER_VAL_TYPE_UINT8)
+             attribute_id == chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id)
     {
-        uint8_t level = std::min<uint8_t>(254, val->val.u8);
-        if (level != s_last_level)
-        {
-            s_last_level = level;
-            ESP_LOGI(TAG, "CurrentLevel update -> %d", level);
-            attribute_t *onoff_attr = attribute::get(
-                endpoint::get_id(s_encoder_ep),
-                chip::app::Clusters::OnOff::Id,
-                chip::app::Clusters::OnOff::Attributes::OnOff::Id);
-            bool current_onoff = true;
-            if (onoff_attr)
-            {
-                esp_matter_attr_val_t v;
-                attribute::get_val(onoff_attr, &v);
-                current_onoff = v.val.b;
-            }
-            if (onoff_attr && level == 0 && current_onoff)
-            {
-                esp_matter_attr_val_t v = esp_matter_bool(false);
-                attribute::set_val(onoff_attr, &v);
-                attribute::report(endpoint::get_id(s_encoder_ep),
-                                  chip::app::Clusters::OnOff::Id,
-                                  chip::app::Clusters::OnOff::Attributes::OnOff::Id,
-                                  &v);
-                ESP_LOGI(TAG, "Auto-off por nivel 0");
-                wired::set_mosfet(s_last_level, false);
-            }
-            else
-            {
-                wired::set_mosfet(s_last_level, current_onoff);
-            }
-        }
-    }
-    else
-    {
-        ret = ESP_ERR_NOT_SUPPORTED;
-    }
-    return ret;
-}
+        uint8_t new_level = val->val.u8;
 
-// ------------------------------------------------------------------
-// Inicialización y API pública
-// ------------------------------------------------------------------
-void wired::encoder_init_pins()
-{
-    gpio_config_t io_conf = {};
-    io_conf.intr_type = GPIO_INTR_ANYEDGE;
-    io_conf.pin_bit_mask = (1ULL << PIN_CLK) | (1ULL << PIN_DT) | (1ULL << PIN_SW);
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
-    gpio_config(&io_conf);
-}
-
-void wired::start_encoder(esp_matter::endpoint_t *encoder_ep)
-{
-    if (!encoder_ep)
-    {
-        ESP_LOGE(TAG, "start_encoder: endpoint null");
-        return;
-    }
-
-    s_encoder_ep = encoder_ep;
-
-    if (!s_enc_queue)
-    {
-        s_enc_queue = xQueueCreate(16, sizeof(enc_event_t));
-        if (!s_enc_queue)
-        {
-            ESP_LOGE(TAG, "No se pudo crear cola enc");
-            return;
+        // Ignoramos cambios “fantasmas” de nivel 1 cuando ya estamos On
+        if (g_onoff && new_level == 1 && g_level > 1) {
+            // descartamos este nivel intermedio
+        } else {
+            g_level = new_level;
+            if (g_level > 0) last_nonzero_level = g_level;
+            update_needed = true;
         }
     }
 
-    encoder_init_pins();
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(PIN_CLK, encoder_isr_handler, (void *)PIN_CLK);
-    gpio_isr_handler_add(PIN_DT, encoder_isr_handler, (void *)PIN_DT);
-    gpio_isr_handler_add(PIN_SW, encoder_isr_handler, (void *)PIN_SW);
+    // --- Aplicar update al MOSFET ---
+    if (update_needed) {
+        wired::set_mosfet(g_level, g_onoff);
+        ESP_LOGI(TAG, "Update -> OnOff=%d, Level=%d", g_onoff, g_level);
+    }
 
-    xTaskCreate(encoder_task, "encoder_task", 4096, nullptr, 5, NULL);
-    ESP_LOGI(TAG, "encoder iniciado");
+    return ESP_OK;
 }
