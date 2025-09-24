@@ -39,19 +39,41 @@ namespace wired
         channel.speed_mode = LEDC_LOW_SPEED_MODE;
         channel.timer_sel = LEDC_TIMER_0;
         ledc_channel_config(&channel);
+        ledc_fade_func_install(0);
+    }
+
+    void fade_mosfet(uint8_t start_level, uint8_t target_level, uint32_t duration_ms)
+    {
+        int steps = abs(target_level - start_level);
+        if (steps == 0)
+            return;
+
+        int step_delay = duration_ms / steps;
+        int step_dir = (target_level > start_level) ? 1 : -1;
+
+        for (int i = 0; i != steps; i += step_dir)
+        {
+            g_level = start_level + i;
+            set_mosfet(g_level, g_level > 0 || g_onoff);
+            vTaskDelay(pdMS_TO_TICKS(step_delay));
+        }
+        g_level = target_level;
+        set_mosfet(g_level, g_level > 0 || g_onoff);
     }
 
     void set_mosfet(uint8_t level, bool onoff)
     {
         static int last_duty = -1;
-        int duty = onoff ? (level * 1023) / 254 : 0;
+        int duty_target = onoff ? (level * 1023) / 254 : 0;
 
-        if (duty != last_duty)
+        if (duty_target != last_duty)
         {
-            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
-            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-            ESP_LOGI(TAG, "set_mosfet level=%d onoff=%d duty=%d", level, onoff, duty);
-            last_duty = duty;
+            // Fade en hardware (2 segundos = 2000 ms)
+            ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty_target, 2000);
+            ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_NO_WAIT);
+
+            ESP_LOGI(TAG, "set_mosfet level=%d onoff=%d duty=%d", level, onoff, duty_target);
+            last_duty = duty_target;
         }
     }
 
