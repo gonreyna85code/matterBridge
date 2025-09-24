@@ -102,11 +102,11 @@ extern "C" void app_main()
     ABORT_APP_ON_FAILURE(aggregator != nullptr, ESP_LOGE(TAG, "Failed to create aggregator endpoint"));
 
     temperature_sensor::config_t temp_sensor_config;
-    endpoint_t *temp_sensor_ep = temperature_sensor::create(node, &temp_sensor_config, ENDPOINT_FLAG_NONE, NULL);
+    endpoint_t *temp_ep = temperature_sensor::create(node, &temp_sensor_config, ENDPOINT_FLAG_NONE, NULL);
     // Cluster BridgedDeviceBasicInformation
     cluster::bridged_device_basic_information::config_t basic_info_cfg{};
-    cluster::bridged_device_basic_information::create(temp_sensor_ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
-    uint16_t ep_id = endpoint::get_id(temp_sensor_ep);
+    cluster::bridged_device_basic_information::create(temp_ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
+    uint16_t ep_id = endpoint::get_id(temp_ep);
     attribute_t *node_label_attr = attribute::get(
         ep_id,
         chip::app::Clusters::BridgedDeviceBasicInformation::Id,
@@ -120,15 +120,16 @@ extern "C" void app_main()
                           chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
                           &val);
     }
-    ABORT_APP_ON_FAILURE(temp_sensor_ep != nullptr, ESP_LOGE(TAG, "Failed to create temperature_sensor endpoint"));
+    ABORT_APP_ON_FAILURE(temp_ep != nullptr, ESP_LOGE(TAG, "Failed to create temperature_sensor endpoint"));
 
     // Humidity sensor
     humidity_sensor::config_t humidity_sensor_config;
-    endpoint_t *humidity_sensor_ep = humidity_sensor::create(node, &humidity_sensor_config, ENDPOINT_FLAG_NONE, NULL);
+    endpoint_t *hum_ep = humidity_sensor::create(node, &humidity_sensor_config, ENDPOINT_FLAG_NONE, NULL);
     // Cluster BridgedDeviceBasicInformation
     cluster::bridged_device_basic_information::config_t basic_info2_cfg{};
-    cluster::bridged_device_basic_information::create(humidity_sensor_ep, &basic_info2_cfg, CLUSTER_FLAG_SERVER);
-    uint16_t ep_id2 = endpoint::get_id(humidity_sensor_ep);
+    cluster::bridged_device_basic_information::create(hum_ep, &basic_info2_cfg, CLUSTER_FLAG_SERVER);
+    uint16_t ep_id2 = endpoint::get_id(hum_ep);
+    
     attribute_t *node_label_attr2 = attribute::get(
         ep_id2,
         chip::app::Clusters::BridgedDeviceBasicInformation::Id,
@@ -142,15 +143,10 @@ extern "C" void app_main()
                           chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
                           &val2);
     }
-    ABORT_APP_ON_FAILURE(humidity_sensor_ep != nullptr, ESP_LOGE(TAG, "Failed to create humidity_sensor endpoint"));
-
-    wired::dht_config_t dht_cfg{
-        .pin = GPIO_NUM_1,
-        .type = wired::dht_type_t::DHT11,
-        .temp_ep_id = endpoint::get_id(temp_sensor_ep),
-        .hum_ep_id = endpoint::get_id(humidity_sensor_ep)};
-    wired::start_dht(&dht_cfg);
-
+    ABORT_APP_ON_FAILURE(hum_ep != nullptr, ESP_LOGE(TAG, "Failed to create humidity_sensor endpoint"));
+   
+    wired::start_aht10(temp_ep, hum_ep);
+    
     // Led endpoint (remote dimmer switch)
     dimmable_light::config_t bridge_config{};
     endpoint_t *ep = dimmable_light::create(node, &bridge_config, ENDPOINT_FLAG_NONE, nullptr);
@@ -192,6 +188,7 @@ extern "C" void app_main()
 
     /* Matter start */
     err = esp_matter::start(app_event_cb);
-    ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
-    bridge::init(node);
-}
+    ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));    
+    bridge::init(node);  
+
+}   
