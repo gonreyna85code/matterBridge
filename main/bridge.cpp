@@ -214,13 +214,24 @@ namespace bridge
             // Revisar dispositivos offline
             if (xSemaphoreTake(esp01_mutex, portMAX_DELAY) == pdTRUE)
             {
-                for (auto &entry : esp01_map)
+                for (auto it = esp01_map.begin(); it != esp01_map.end();)
                 {
-                    if (entry.second.ep && entry.second.reachable && now - entry.second.last_seen > 60000)
+                    if (it->second.ep && it->second.reachable && now - it->second.last_seen > 60000)
                     {
-                        entry.second.reachable = false;
-                        set_reachable(endpoint::get_id(entry.second.ep), false);
-                        ESP_LOGI(TAG, "ESP01 OFFLINE: %s, endpoint desactivado", entry.first.c_str());
+                        it->second.reachable = false;
+                        set_reachable(endpoint::get_id(it->second.ep), false);
+                        ESP_LOGI(TAG, "ESP01 OFFLINE: %s, endpoint desactivado", it->first.c_str());
+                    }
+
+                    if (now - it->second.last_seen > 24UL * 60 * 60 * 1000) // 24h en ms
+                    {
+                        ESP_LOGI(TAG, "ESP01 ELIMINADO: %s", it->first.c_str());
+                        endpoint::destroy(node, it->second.ep); // destruye correctamente el endpoint
+                        it = esp01_map.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
                     }
                 }
                 xSemaphoreGive(esp01_mutex);
