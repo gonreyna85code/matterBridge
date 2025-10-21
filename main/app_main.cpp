@@ -195,7 +195,7 @@ extern "C" void app_main()
 
     // --- Start WebGUI ---
     static webgui::config_t cfg;
-    cfg.bridge_name = "Matter Bridge v1.0";
+    cfg.bridge_name = "Matter Bridge v2.0";
     cfg.udp_port = 12345;
     cfg.offline_timeout_ms = 60000;
 
