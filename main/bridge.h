@@ -1,5 +1,5 @@
 #pragma once
-
+#include "devices.h"
 #include <esp_matter.h>
 #include <string>
 #include <map>
@@ -15,6 +15,8 @@ struct esp01_info_t {
     bool reachable;
 };
 
+const std::map<std::string, devices::device_t> &get_device_map();
+
 // -------------------- Inicialización --------------------
 void init(esp_matter::node_t *node);
 
@@ -29,7 +31,7 @@ void start_udp_task(void *pvParameters);
 void restore_endpoints(esp_matter::node_t *node);
 
 // -------------------- Reachable / Unreachable --------------------
-esp_err_t set_reachable(uint16_t endpoint_id, bool reachable);
+esp_err_t set_reachable(const std::string &uid, bool reachable);
 
 // -------------------- Handler de updates de atributos --------------------
 esp_err_t handle_attribute_update(uint16_t endpoint_id,

@@ -16,6 +16,7 @@
 #include <inttypes.h>
 #include <wired.h>
 #include <bridge.h>
+#include <webserver.h>
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -81,18 +82,18 @@ static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint
 
 extern "C" void app_main()
 {
-    esp_log_level_set("*", ESP_LOG_WARN);
-    esp_log_level_set("app_main", ESP_LOG_INFO);
-    esp_log_level_set("WIRED", ESP_LOG_INFO);
-    esp_log_level_set("BRIDGE", ESP_LOG_INFO);
-
-    esp_err_t err = ESP_OK;
-    nvs_flash_init();
+    
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
     // --- Init de tus módulos ---
     wired::pwm_init();
-
+    devices::init_types();
     /* Create a Matter node and add the mandatory Root Node device type on endpoint 0 */
-    node::config_t node_config;
+    node::config_t node_config;   
     node_t *node = node::create(&node_config, app_attribute_update_cb, NULL);
     ABORT_APP_ON_FAILURE(node != nullptr, ESP_LOGE(TAG, "Failed to create Matter node"));
 
@@ -184,11 +185,20 @@ extern "C" void app_main()
     }
 
     /* Restore previously created endpoints */
-    bridge::restore_endpoints(node);
+    devices::load_devices_from_nvs(node);
 
     /* Matter start */
     err = esp_matter::start(app_event_cb);
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));    
+    
     bridge::init(node);  
+
+    // --- Start WebGUI ---
+    static webgui::config_t cfg;
+    cfg.bridge_name = "Matter Bridge v1.0";
+    cfg.udp_port = 12345;
+    cfg.offline_timeout_ms = 60000;
+
+    webgui::start(&bridge::get_device_map(), &cfg);
 
 }   
