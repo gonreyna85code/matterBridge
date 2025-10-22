@@ -1,0 +1,9 @@
+{
+  "uid": "a46d4e",
+  "type": ["REL0", "TEMP", "HUMI"],
+  "data": {
+    "REL0": { "0": true },
+    "TEMP": { "0": 27.8 },
+    "HUMI": { "0": 36.2 }
+  }
+}

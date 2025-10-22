@@ -42,25 +42,6 @@ namespace wired
         ledc_fade_func_install(0);
     }
 
-    void fade_mosfet(uint8_t start_level, uint8_t target_level, uint32_t duration_ms)
-    {
-        int steps = abs(target_level - start_level);
-        if (steps == 0)
-            return;
-
-        int step_delay = duration_ms / steps;
-        int step_dir = (target_level > start_level) ? 1 : -1;
-
-        for (int i = 0; i != steps; i += step_dir)
-        {
-            g_level = start_level + i;
-            set_mosfet(g_level, g_level > 0 || g_onoff);
-            vTaskDelay(pdMS_TO_TICKS(step_delay));
-        }
-        g_level = target_level;
-        set_mosfet(g_level, g_level > 0 || g_onoff);
-    }
-
     void set_mosfet(uint8_t level, bool onoff)
     {
         static int last_duty = -1;
