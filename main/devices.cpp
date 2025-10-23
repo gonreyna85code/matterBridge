@@ -1,10 +1,11 @@
 #include <map>
 #include <string>
 #include <functional>
+#include <vector>
+#include <ctime>
 #include <esp_matter.h>
 #include <esp_log.h>
 #include <cJSON.h>
-#include <ctime>
 #include <nvs_flash.h>
 #include <nvs.h>
 #include <lwip/sockets.h>
@@ -17,9 +18,6 @@ namespace devices
     static const char *TAG = "DEVICES";
     static const char *NVS_NAMESPACE = "devices";
 
-    // =============================================================
-    // 🔧 ESTRUCTURAS Y TIPOS
-    // =============================================================
     struct device_t
     {
         std::string uid;
@@ -27,16 +25,16 @@ namespace devices
         node_t *node;
         time_t last_seen;
         bool reachable;
-        std::map<std::string, endpoint_t *> endpoints; // type → endpoint
+        bool command_support = true;
+        std::map<std::string, endpoint_t *> endpoints;
         cJSON *data = nullptr;
     };
 
-    // Structure to store device data in NVS
     struct device_nvs_data_t
     {
         std::string uid;
         std::string ip;
-        std::vector<std::string> type; // List of endpoint types
+        std::vector<std::string> type;
     };
 
     struct cluster_map_t
@@ -52,75 +50,45 @@ namespace devices
         {"TEMP", {chip::app::Clusters::TemperatureMeasurement::Id, chip::app::Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Id, 100.0f}},
         {"HUMI", {chip::app::Clusters::RelativeHumidityMeasurement::Id, chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, 100.0f}},
         {"DIMM", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
+        {"LUMI", {chip::app::Clusters::IlluminanceMeasurement::Id, chip::app::Clusters::IlluminanceMeasurement::Attributes::MeasuredValue::Id, 1.0f}},
     };
 
-    // Handler para cada tipo de dispositivo
-    using creator_t = std::function<endpoint_t *(node_t *node, const std::string &uid)>;
-
-    // =============================================================
-    // 🔧 REGISTROS INTERNOS
-    // =============================================================
+    using creator_t = std::function<endpoint_t *(node_t *, const std::string &)>;
     std::map<std::string, device_t> registry;
     static std::map<std::string, creator_t> creators;
 
-    // =============================================================
-    // 🧠 REGISTROS PÚBLICOS
-    // =============================================================
     void register_device_type(const std::string &type, creator_t fn)
     {
         creators[type] = fn;
         ESP_LOGI(TAG, "Registered device type: %s", type.c_str());
     }
 
-    // =============================================================
-    // 💾 NVS FUNCTIONS
-    // =============================================================
     esp_err_t save_device_to_nvs(const device_nvs_data_t &device_data)
     {
         nvs_handle_t nvs_handle;
         esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
         if (err != ESP_OK)
         {
-            ESP_LOGE(TAG, "Error (%s) opening NVS namespace!", esp_err_to_name(err));
+            ESP_LOGE(TAG, "Error (%s) opening NVS!", esp_err_to_name(err));
             return err;
         }
 
-        // Create a key for this device (e.g., "device_uid")
         std::string key = "device_" + device_data.uid;
-
-        // Serialize the device data to JSON
         cJSON *root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "uid", device_data.uid.c_str());
         cJSON_AddStringToObject(root, "ip", device_data.ip.c_str());
 
-        cJSON *types_array = cJSON_CreateArray();
-        for (const auto &type : device_data.type)
-        {
-            cJSON_AddItemToArray(types_array, cJSON_CreateString(type.c_str()));
-        }
-        cJSON_AddItemToObject(root, "type", types_array);
+        cJSON *types = cJSON_CreateArray();
+        for (auto &t : device_data.type)
+            cJSON_AddItemToArray(types, cJSON_CreateString(t.c_str()));
+        cJSON_AddItemToObject(root, "type", types);
 
-        char *json_str = cJSON_PrintUnformatted(root);
-        cJSON_Delete(root);
-
-        // Store the JSON string in NVS
-        err = nvs_set_str(nvs_handle, key.c_str(), json_str);
-        free(json_str);
-
-        if (err != ESP_OK)
-        {
-            ESP_LOGE(TAG, "Error (%s) writing device data to NVS!", esp_err_to_name(err));
-        }
-
-        // Commit changes
-        esp_err_t commit_err = nvs_commit(nvs_handle);
-        if (commit_err != ESP_OK)
-        {
-            ESP_LOGE(TAG, "Error (%s) committing NVS changes!", esp_err_to_name(commit_err));
-        }
-
-        // Close
+        char *json = cJSON_PrintUnformatted(root);
+        err = nvs_set_str(nvs_handle, key.c_str(), json);
+        nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
+        cJSON_free(json);
+        cJSON_Delete(root);
         return err;
     }
 
@@ -128,7 +96,6 @@ namespace devices
     {
         if (!ep)
             return;
-
         auto attr = esp_matter::attribute::get(
             esp_matter::endpoint::get_id(ep),
             chip::app::Clusters::BridgedDeviceBasicInformation::Id,
@@ -137,9 +104,9 @@ namespace devices
         if (attr)
         {
             esp_matter_attr_val_t val = esp_matter_bool(reachable);
-            esp_matter::attribute::set_val(attr, &val);
-            esp_matter::attribute::report(
-                esp_matter::endpoint::get_id(ep),
+            attribute::set_val(attr, &val);
+            attribute::report(
+                endpoint::get_id(ep),
                 chip::app::Clusters::BridgedDeviceBasicInformation::Id,
                 chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::Reachable::Id,
                 &val);
@@ -283,24 +250,23 @@ namespace devices
     // =============================================================
     // 🧩 CREAR / ACTUALIZAR DISPOSITIVO
     // =============================================================
-
     void create_or_update(const std::string &ip, node_t *node, const std::string &json_str)
     {
         ESP_LOGW(TAG, "Received JSON: %s", json_str.c_str());
-
         cJSON *root = cJSON_Parse(json_str.c_str());
         if (!root)
         {
-            ESP_LOGE(TAG, "Invalid JSON: %s", json_str.c_str());
+            ESP_LOGE(TAG, "Invalid JSON");
             return;
         }
 
-        const cJSON *uid_j = cJSON_GetObjectItem(root, "uid");
-        const cJSON *types_j = cJSON_GetObjectItem(root, "type");
+        cJSON *uid_j = cJSON_GetObjectItem(root, "uid");
+        cJSON *types_j = cJSON_GetObjectItem(root, "type");
+        cJSON *cmd_j = cJSON_GetObjectItem(root, "command_support");
 
         if (!cJSON_IsString(uid_j) || !cJSON_IsArray(types_j))
         {
-            ESP_LOGE(TAG, "Missing uid or types[] in JSON");
+            ESP_LOGE(TAG, "Missing uid or types[]");
             cJSON_Delete(root);
             return;
         }
@@ -310,16 +276,16 @@ namespace devices
         dev.uid = uid;
         dev.ip = ip;
         dev.node = node;
-        dev.last_seen = esp_timer_get_time() / 1000; // <--- siempre actualizar
+        dev.last_seen = esp_timer_get_time() / 1000;
+        dev.command_support = (!cmd_j || cJSON_IsTrue(cmd_j));
+
         if (!dev.reachable)
         {
             dev.reachable = true;
-            ESP_LOGW(TAG, "Device %s is now ONLINE", uid.c_str());
-            for (auto &[type, ep] : dev.endpoints)
+            for (auto &[t, ep] : dev.endpoints)
                 report_reachable(ep, true);
         }
 
-        // --- Procesar cada tipo ---
         cJSON *type_elem = nullptr;
         cJSON_ArrayForEach(type_elem, types_j)
         {
@@ -329,73 +295,59 @@ namespace devices
 
             if (dev.endpoints.find(type) == dev.endpoints.end())
             {
-                ESP_LOGW(TAG, "CHECKING ENDPOINT");
                 auto it = creators.find(type);
                 if (it == creators.end())
-                {
-                    ESP_LOGW(TAG, "No creator registered for type: %s", type.c_str());
                     continue;
-                }
 
                 endpoint_t *ep = it->second(node, uid + "_" + type);
                 if (!ep)
-                {
-                    ESP_LOGE(TAG, "Creator returned null or failed for type '%s'", type.c_str());
                     continue;
-                }
 
-                ESP_LOGW(TAG, "CREATING ENDPOINT");
                 dev.endpoints[type] = ep;
-                ESP_LOGW(TAG, "Created endpoint type '%s' for %s", type.c_str(), uid.c_str());
+                report_reachable(ep, true);
 
-                // 💾 Guardar en NVS solo cuando se crea un nuevo endpoint
-                device_nvs_data_t device_data;
-                device_data.uid = uid;
-                device_data.ip = ip;
-
-                // reconstruir lista actualizada de tipos
-                device_data.type.clear();
+                device_nvs_data_t data;
+                data.uid = uid;
+                data.ip = ip;
                 for (auto &[t, _] : dev.endpoints)
-                    device_data.type.push_back(t);
-
-                save_device_to_nvs(device_data);
+                    data.type.push_back(t);
+                save_device_to_nvs(data);
             }
         }
 
-        /////////////////////////////////////////////////////////////////////////////////////////////////////
-        /////////////                         REPORT TO MATTER                              /////////////////
-        /////////////////////////////////////////////////////////////////////////////////////////////////////
-
         cJSON *data = cJSON_GetObjectItem(root, "data");
-        cJSON *type_item = nullptr;
-        cJSON_ArrayForEach(type_item, data)
+        if (data)
         {
-            std::string type = type_item->string;
-            cJSON *field = cJSON_GetObjectItem(type_item, "0");
-            if (!field)
-                continue;
+            cJSON *type_item = nullptr;
+            cJSON_ArrayForEach(type_item, data)
+            {
+                std::string type = type_item->string;
+                cJSON *field = cJSON_GetObjectItem(type_item, "0");
+                if (!field)
+                    continue;
 
-            auto it_ep = dev.endpoints.find(type);
-            auto it_map = type_map.find(type);
-            if (it_ep == dev.endpoints.end() || it_map == type_map.end())
-                continue;
+                auto it_ep = dev.endpoints.find(type);
+                auto it_map = type_map.find(type);
+                if (it_ep == dev.endpoints.end() || it_map == type_map.end())
+                    continue;
 
-            endpoint_t *ep = it_ep->second;
-            uint16_t ep_id = endpoint::get_id(ep);
-            auto &map = it_map->second;
+                endpoint_t *ep = it_ep->second;
+                auto &map = it_map->second;
+                uint16_t ep_id = endpoint::get_id(ep);
 
-            auto attr = attribute::get(ep_id, map.cluster_id, map.attribute_id);
-            if (!attr)
-                continue;
+                auto attr = attribute::get(ep_id, map.cluster_id, map.attribute_id);
+                if (!attr)
+                    continue;
 
-            esp_matter_attr_val_t val{};
-            if (cJSON_IsBool(field))
-                val = esp_matter_bool(cJSON_IsTrue(field));
-            else if (cJSON_IsNumber(field))
-                val = esp_matter_int16((int16_t)(field->valuedouble * map.multiplier));
+                esp_matter_attr_val_t val{};
+                if (cJSON_IsBool(field))
+                    val = esp_matter_bool(cJSON_IsTrue(field));
+                else if (cJSON_IsNumber(field))
+                    val = esp_matter_int16((int16_t)(field->valuedouble * map.multiplier));
 
-            attribute::set_val(attr, &val);
-            attribute::report(ep_id, map.cluster_id, map.attribute_id, &val);
+                attribute::set_val(attr, &val);
+                attribute::report(ep_id, map.cluster_id, map.attribute_id, &val);
+            }
         }
 
         cJSON_Delete(root);
@@ -406,12 +358,11 @@ namespace devices
         int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (sock < 0)
             return;
-
-        struct sockaddr_in addr{};
+        sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(12346);
         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
-        sendto(sock, payload.c_str(), payload.size(), 0, (struct sockaddr *)&addr, sizeof(addr));
+        sendto(sock, payload.c_str(), payload.size(), 0, (sockaddr *)&addr, sizeof(addr));
         close(sock);
     }
 
@@ -422,330 +373,118 @@ namespace devices
 
         for (auto &[uid, dev] : registry)
         {
+            if (!dev.command_support)
+                continue;
+
             for (auto &[type, endpoint] : dev.endpoints)
             {
-                if (endpoint::get_id(endpoint) == ep)
-                {
-                    auto it_map = type_map.find(type);
-                    if (it_map == type_map.end())
-                    {
-                        ESP_LOGW(TAG, "No mapping found for type %s", type.c_str());
-                        return ESP_ERR_NOT_FOUND;
-                    }
-                    const auto &map = it_map->second;
+                if (endpoint::get_id(endpoint) != ep)
+                    continue;
 
-                    // --------------------------------------------------
-                    // 1️⃣ Crear JSON
-                    // --------------------------------------------------
-                    cJSON *root = cJSON_CreateObject();
-                    cJSON_AddStringToObject(root, "uid", uid.c_str());
+                auto it_map = type_map.find(type);
+                if (it_map == type_map.end())
+                    return ESP_ERR_NOT_FOUND;
 
-                    cJSON *type_arr = cJSON_CreateArray();
-                    for (auto &[t, _] : dev.endpoints)
-                        cJSON_AddItemToArray(type_arr, cJSON_CreateString(t.c_str()));
-                    cJSON_AddItemToObject(root, "type", type_arr);
+                const auto &map = it_map->second;
+                cJSON *root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "uid", uid.c_str());
+                cJSON_AddBoolToObject(root, "command_support", dev.command_support);
 
-                    cJSON *data = cJSON_CreateObject();
-                    cJSON *inner = cJSON_CreateObject();
+                cJSON *type_arr = cJSON_CreateArray();
+                for (auto &[t, _] : dev.endpoints)
+                    cJSON_AddItemToArray(type_arr, cJSON_CreateString(t.c_str()));
+                cJSON_AddItemToObject(root, "type", type_arr);
 
-                    // Genérico: detectar tipo de dato del atributo
-                    if (val->type == ESP_MATTER_VAL_TYPE_BOOLEAN)
-                    {
-                        cJSON_AddBoolToObject(inner, "0", val->val.b);
-                    }
-                    else if (val->type == ESP_MATTER_VAL_TYPE_UINT8)
-                    {
-                        cJSON_AddNumberToObject(inner, "0", val->val.u8);
-                    }
-                    else if (val->type == ESP_MATTER_VAL_TYPE_FLOAT)
-                    {
-                        cJSON_AddNumberToObject(inner, "0", val->val.f / map.multiplier);
-                    }
-                    else if (val->type == ESP_MATTER_VAL_TYPE_INT16)
-                    {
-                        cJSON_AddNumberToObject(inner, "0", (float)val->val.i16 / map.multiplier);
-                    }
-                    else if (val->type == ESP_MATTER_VAL_TYPE_UINT16)
-                    {
-                        cJSON_AddNumberToObject(inner, "0", (float)val->val.u16 / map.multiplier);
-                    }
-                    else
-                    {
-                        ESP_LOGW(TAG, "Unhandled value type %d", val->type);
-                        cJSON_Delete(root);
-                        return ESP_ERR_INVALID_ARG;
-                    }
+                cJSON *data = cJSON_CreateObject();
+                cJSON *inner = cJSON_CreateObject();
 
-                    cJSON_AddItemToObject(data, type.c_str(), inner);
-                    cJSON_AddItemToObject(root, "data", data);
+                if (val->type == ESP_MATTER_VAL_TYPE_BOOLEAN)
+                    cJSON_AddBoolToObject(inner, "0", val->val.b);
+                else if (val->type == ESP_MATTER_VAL_TYPE_INT16)
+                    cJSON_AddNumberToObject(inner, "0", (float)val->val.i16 / map.multiplier);
+                else if (val->type == ESP_MATTER_VAL_TYPE_UINT16)
+                    cJSON_AddNumberToObject(inner, "0", (float)val->val.u16 / map.multiplier);
 
-                    // --------------------------------------------------
-                    // 2️⃣ Serializar y enviar por UDP
-                    // --------------------------------------------------
-                    char *json = cJSON_PrintUnformatted(root);
-                    ESP_LOGI(TAG, "Sending JSON to %s: %s", dev.ip.c_str(), json);
+                cJSON_AddItemToObject(data, type.c_str(), inner);
+                cJSON_AddItemToObject(root, "data", data);
 
-                    send_udp_json(dev.ip, std::string(json));
-                    cJSON_free(json);
-                    cJSON_Delete(root);
-
-                    ESP_LOGI(TAG, "Attribute update sent for %s (%s)", uid.c_str(), type.c_str());
-                    return ESP_OK;
-                }
+                char *json = cJSON_PrintUnformatted(root);
+                send_udp_json(dev.ip, std::string(json));
+                ESP_LOGI(TAG, "Sent JSON to %s: %s", dev.ip.c_str(), json);
+                cJSON_free(json);
+                cJSON_Delete(root);
+                return ESP_OK;
             }
         }
-
         return ESP_ERR_NOT_FOUND;
     }
 
     // =============================================================
-    // 💡 EJEMPLOS DE TIPOS (podés moverlos a archivos separados)
+    // 🔧 REGISTRO DE TIPOS
     // =============================================================
     void init_REL0_type()
     {
-        register_device_type("REL0", [](node_t *node, const std::string &uid) -> endpoint_t *
+        register_device_type("REL0", [](node_t *n, const std::string &uid)
                              {
-        endpoint::on_off_plugin_unit::config_t cfg{};
-        endpoint_t *ep = endpoint::on_off_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-       
-        cluster::bridged_device_basic_information::config_t bi{};
-        cluster::bridged_device_basic_information::create(ep, &bi, CLUSTER_FLAG_SERVER);
-
-        uint16_t ep_id = endpoint::get_id(ep);
-        auto *attr = attribute::get(
-            ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-        if (attr) {
-            esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
-            attribute::set_val(attr, &val);
-            attribute::report(ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
-
-        endpoint::enable(ep);
-        return ep; });
-    }
-
-    void init_REL1_type()
-    {
-        register_device_type("REL1", [](node_t *node, const std::string &uid) -> endpoint_t *
-                             {
-        endpoint::on_off_plugin_unit::config_t cfg{};
-        endpoint_t *ep = endpoint::on_off_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-       
-        cluster::bridged_device_basic_information::config_t bi{};
-        cluster::bridged_device_basic_information::create(ep, &bi, CLUSTER_FLAG_SERVER);
-
-        uint16_t ep_id = endpoint::get_id(ep);
-        auto *attr = attribute::get(
-            ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-        if (attr) {
-            esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
-            attribute::set_val(attr, &val);
-            attribute::report(ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
-
-        endpoint::enable(ep);
-        return ep; });
-    }
-
-    void init_REL2_type()
-    {
-        register_device_type("REL2", [](node_t *node, const std::string &uid) -> endpoint_t *
-                             {
-        endpoint::on_off_plugin_unit::config_t cfg{};
-        endpoint_t *ep = endpoint::on_off_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-        
-        cluster::bridged_device_basic_information::config_t bi{};
-        cluster::bridged_device_basic_information::create(ep, &bi, CLUSTER_FLAG_SERVER);
-
-        uint16_t ep_id = endpoint::get_id(ep);
-        auto *attr = attribute::get(
-            ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-        if (attr) {
-            esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
-            attribute::set_val(attr, &val);
-            attribute::report(ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
-
-        endpoint::enable(ep);
-        return ep; });
-    }
-
-    void init_REL3_type()
-    {
-        register_device_type("REL3", [](node_t *node, const std::string &uid) -> endpoint_t *
-                             {
-        endpoint::on_off_plugin_unit::config_t cfg{};
-        endpoint_t *ep = endpoint::on_off_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-       
-        cluster::bridged_device_basic_information::config_t bi{};
-        cluster::bridged_device_basic_information::create(ep, &bi, CLUSTER_FLAG_SERVER);
-
-        uint16_t ep_id = endpoint::get_id(ep);
-        auto *attr = attribute::get(
-            ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-        if (attr) {
-            esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
-            attribute::set_val(attr, &val);
-            attribute::report(ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
-
-        endpoint::enable(ep);
-        return ep; });
+            auto ep = endpoint::on_off_plugin_unit::create(n, nullptr, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+            cluster::bridged_device_basic_information::create(ep, nullptr, CLUSTER_FLAG_SERVER);
+            endpoint::enable(ep);
+            return ep; });
     }
 
     void init_TEMP_type()
     {
-        register_device_type("TEMP", [](node_t *node, const std::string &uid) -> endpoint_t *
+        register_device_type("TEMP", [](node_t *n, const std::string &uid)
                              {
-        endpoint::temperature_sensor::config_t cfg{};
-        endpoint_t *ep = endpoint::temperature_sensor::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-        
-        cluster::bridged_device_basic_information::config_t bi{};
-        cluster::bridged_device_basic_information::create(ep, &bi, CLUSTER_FLAG_SERVER);
-
-        uint16_t ep_id = endpoint::get_id(ep);
-        auto *attr = attribute::get(
-            ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-        if (attr) {
-            esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
-            attribute::set_val(attr, &val);
-            attribute::report(ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
-
-        endpoint::enable(ep);
-        return ep; });
+            auto ep = endpoint::temperature_sensor::create(n, nullptr, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+            cluster::bridged_device_basic_information::create(ep, nullptr, CLUSTER_FLAG_SERVER);
+            endpoint::enable(ep);
+            return ep; });
     }
 
     void init_HUMI_type()
     {
-        register_device_type("HUMI", [](node_t *node, const std::string &uid) -> endpoint_t *
+        register_device_type("HUMI", [](node_t *n, const std::string &uid)
                              {
-        endpoint::humidity_sensor::config_t cfg{};
-        endpoint_t *ep = endpoint::humidity_sensor::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-
-        cluster::bridged_device_basic_information::config_t bi{};
-        cluster::bridged_device_basic_information::create(ep, &bi, CLUSTER_FLAG_SERVER);
-
-        uint16_t ep_id = endpoint::get_id(ep);
-        auto *attr = attribute::get(
-            ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-        if (attr) {
-            esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
-            attribute::set_val(attr, &val);
-            attribute::report(ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
-
-        endpoint::enable(ep);
-        return ep; });
+            auto ep = endpoint::humidity_sensor::create(n, nullptr, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+            cluster::bridged_device_basic_information::create(ep, nullptr, CLUSTER_FLAG_SERVER);
+            endpoint::enable(ep);
+            return ep; });
     }
 
     void init_DIMM_type()
     {
-        register_device_type("DIMM", [](node_t *node, const std::string &uid) -> endpoint_t *
+        register_device_type("DIMM", [](node_t *n, const std::string &uid)
                              {
-        endpoint::dimmable_plugin_unit::config_t cfg{};
-        endpoint_t *ep = endpoint::dimmable_plugin_unit::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr); 
-
-        // Información básica
-        cluster::bridged_device_basic_information::config_t bi{};
-        cluster::bridged_device_basic_information::create(ep, &bi, CLUSTER_FLAG_SERVER);
-
-        // NodeLabel (UID visible)
-        uint16_t ep_id = endpoint::get_id(ep);
-        auto *attr = attribute::get(
-            ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-        if (attr) {
-            esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
-            attribute::set_val(attr, &val);
-            attribute::report(ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
-
-        endpoint::enable(ep);
-        return ep; });
+            auto ep = endpoint::dimmable_plugin_unit::create(n, nullptr, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+            cluster::bridged_device_basic_information::create(ep, nullptr, CLUSTER_FLAG_SERVER);
+            endpoint::enable(ep);
+            return ep; });
     }
 
     void init_LUMI_type()
     {
-        register_device_type("LUMI", [](node_t *node, const std::string &uid) -> endpoint_t *
+        register_device_type("LUMI", [](node_t *n, const std::string &uid)
                              {
-        endpoint::light_sensor::config_t cfg{};
-        endpoint_t *ep = endpoint::light_sensor::create(node, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);  
-
-        cluster::bridged_device_basic_information::config_t bi{};
-        cluster::bridged_device_basic_information::create(ep, &bi, CLUSTER_FLAG_SERVER);
-
-        uint16_t ep_id = endpoint::get_id(ep);
-        auto *attr = attribute::get(
-            ep_id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-            chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-        if (attr) {
-            esp_matter_attr_val_t val = esp_matter_char_str((char *)uid.c_str(), uid.size());
-            attribute::set_val(attr, &val);
-            attribute::report(ep_id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                              chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                              &val);
-        }
-
-        endpoint::enable(ep);
-        return ep; });
+            auto ep = endpoint::light_sensor::create(n, nullptr, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+            cluster::bridged_device_basic_information::create(ep, nullptr, CLUSTER_FLAG_SERVER);
+            endpoint::enable(ep);
+            return ep; });
     }
 
-    // =============================================================
-    // 🏁 INIT DE TODOS LOS TIPOS
-    // =============================================================
     void init_types()
     {
         esp_err_t err = nvs_flash_init();
         if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
         {
-            ESP_ERROR_CHECK(nvs_flash_erase());
-            err = nvs_flash_init();
+            nvs_flash_erase();
+            nvs_flash_init();
         }
-        ESP_ERROR_CHECK(err);
         init_REL0_type();
-        init_REL1_type();
-        init_REL2_type();
-        init_REL3_type();
         init_TEMP_type();
         init_HUMI_type();
         init_DIMM_type();
         init_LUMI_type();
     }
+
 } // namespace devices
