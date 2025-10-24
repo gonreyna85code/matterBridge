@@ -20,18 +20,8 @@ const std::map<std::string, devices::device_t> &get_device_map();
 // -------------------- Inicialización --------------------
 void init(esp_matter::node_t *node);
 
-// -------------------- Envío de comandos --------------------
-void send_command_to_esp01(const std::string &device_id, const std::string &payload);
-
 // -------------------- UDP broadcast listener --------------------
 void udp_task(void *pvParameters);
-void start_udp_task(void *pvParameters);
-
-// -------------------- Restore endpoints --------------------
-void restore_endpoints(esp_matter::node_t *node);
-
-// -------------------- Reachable / Unreachable --------------------
-esp_err_t set_reachable(const std::string &uid, bool reachable);
 
 // -------------------- Handler de updates de atributos --------------------
 esp_err_t handle_attribute_update(uint16_t endpoint_id,
