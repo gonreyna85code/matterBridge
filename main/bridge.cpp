@@ -1,7 +1,10 @@
 #include "bridge.h"
-#include "devices.h" // o devices.h si luego decides exponerlo
+#include "devices.h"
 #include <esp_log.h>
 #include <lwip/sockets.h>
+#include <nvs.h>
+#include <nvs_flash.h>
+#include <webserver.h>
 
 namespace bridge
 {
@@ -11,9 +14,18 @@ namespace bridge
 
     void init(esp_matter::node_t *node)
     {
+        
         if (!mutex)
             mutex = xSemaphoreCreateMutex();
+                       
         xTaskCreate(udp_task, "bridge_udp_task", 8192, node, 5, nullptr);
+        // --- Start WebGUI ---
+        static webgui::config_t cfg;
+        cfg.bridge_name = "Matter Bridge v2.0";
+        cfg.udp_port = 12345;
+        cfg.offline_timeout_ms = 60000;
+
+        webgui::start(&bridge::get_device_map(), &cfg);
     }
 
     const std::map<std::string, devices::device_t> &get_device_map()

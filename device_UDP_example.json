@@ -1,7 +1,7 @@
 {
   "uid": "a46d4e",
   "type": ["REL0", "TEMP", "HUMI"],
-  "command_support": true,
+  "c_s": true,
   "data": {
     "REL0": { "0": true },
     "TEMP": { "0": 27.8 },
