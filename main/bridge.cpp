@@ -1,46 +1,55 @@
+// bridge.cpp
 #include "bridge.h"
 #include "devices.h"
 #include <esp_log.h>
 #include <lwip/sockets.h>
-#include <nvs.h>
-#include <nvs_flash.h>
-#include <webserver.h>
+#include <fcntl.h>
+#include <sys/select.h>
+
+using namespace esp_matter;
+using namespace esp_matter::endpoint;
 
 namespace bridge
 {
-
     static const char *TAG = "BRIDGE";
     static SemaphoreHandle_t mutex = nullptr;
-
+    static TaskHandle_t udp_task_handle = nullptr;
+    static uint32_t startup_delay_ms = 60000;
+    static int udp_sock = -1;
+    static esp_matter::node_t *node_global = nullptr;
+    
+    
     void init(esp_matter::node_t *node)
     {
-        
         if (!mutex)
             mutex = xSemaphoreCreateMutex();
-                       
-        xTaskCreate(udp_task, "bridge_udp_task", 8192, node, 5, nullptr);
-        // --- Start WebGUI ---
-        static webgui::config_t cfg;
-        cfg.bridge_name = "Matter Bridge v2.0";
-        cfg.udp_port = 12345;
-        cfg.offline_timeout_ms = 60000;
 
-        webgui::start(&bridge::get_device_map(), &cfg);
+        node_global = node;
+        
+        // arranca udp después de startup_delay_ms (permite que Matter recree endpoints)
+        startup_delay_ms = 120000;        
+        xTaskCreate(udp_task, "bridge_udp_task", 4096, node, 5, &udp_task_handle);
+        devices::init_types();
+        devices::load_devices_from_nvs(node);
     }
 
     const std::map<std::string, devices::device_t> &get_device_map()
     {
-        // Asegurate de incluir "devices.h"
         return devices::registry;
     }
 
     void udp_task(void *pvParameters)
     {
-        esp_matter::node_t *node = (esp_matter::node_t *)pvParameters;
+        esp_matter::node_t *node = (esp_matter::node_t *)pvParameters;        
+
+        if (startup_delay_ms > 0)
+            vTaskDelay(pdMS_TO_TICKS(startup_delay_ms));
+
         int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (sock < 0)
         {
             ESP_LOGE(TAG, "Socket error");
+            udp_task_handle = nullptr;
             vTaskDelete(NULL);
             return;
         }
@@ -49,55 +58,73 @@ namespace bridge
         addr.sin_family = AF_INET;
         addr.sin_port = htons(12345);
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
         if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
         {
             ESP_LOGE(TAG, "Bind failed");
             close(sock);
+            udp_task_handle = nullptr;
             vTaskDelete(NULL);
             return;
         }
 
-        constexpr size_t BUF_SIZE = 1024;
-        char buf[BUF_SIZE];
-        struct sockaddr_in src;
-        socklen_t slen = sizeof(src);
-
         ESP_LOGI(TAG, "UDP listener ready");
 
-        constexpr uint64_t OFFLINE_TIMEOUT_MS = 10000; // 10s
+        udp_sock = sock;
+        constexpr uint64_t OFFLINE_TIMEOUT_MS = 120000; // 120s
+        constexpr size_t BUF_SIZE = 1024;
+        char buf[BUF_SIZE];
 
         while (true)
         {
-            int len = recvfrom(sock, buf, BUF_SIZE - 1, 0, (struct sockaddr *)&src, &slen);
-            if (len > 0)
+            // select con timeout -> event-driven y permite stop rápido
+            fd_set readfds;
+            FD_ZERO(&readfds);
+            FD_SET(sock, &readfds);
+
+            struct timeval tv;
+            tv.tv_sec = 1; // housekeeping cada 1s
+            tv.tv_usec = 0;
+
+            int sel = select(sock + 1, &readfds, NULL, NULL, &tv);            
+
+            if (sel > 0 && FD_ISSET(sock, &readfds))
             {
-                buf[len] = '\0';
-                char ip_str[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &src.sin_addr, ip_str, sizeof(ip_str));
+                struct sockaddr_in src;
+                socklen_t slen = sizeof(src);
+                int len = recvfrom(sock, buf, BUF_SIZE - 1, 0, (struct sockaddr *)&src, &slen);
 
-                std::string ip(ip_str);
-                std::string json_str(buf);
+                if (len > 0)
+                {
+                    buf[len] = '\0';
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &src.sin_addr, ip_str, sizeof(ip_str));
 
-                if (json_str.front() != '{' || json_str.back() != '}')
-                {
-                    ESP_LOGW(TAG, "Invalid UDP payload from %s: %s", ip.c_str(), buf);
-                }
-                else
-                {
-                    devices::create_or_update(ip, node, json_str);
+                    std::string ip(ip_str);
+                    std::string json_str(buf);
+
+                    if (json_str.front() == '{' && json_str.back() == '}')
+                    {
+                        if (mutex)
+                            xSemaphoreTake(mutex, portMAX_DELAY);
+                        devices::create_or_update(ip, node, json_str);
+                        if (mutex)
+                            xSemaphoreGive(mutex);
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "Invalid UDP payload from %s", ip.c_str());
+                    }
                 }
             }
 
-            // 🔄 Revisar estado de todos los dispositivos
+            // housekeeping (una vez por segundo gracias al timeout)
             uint64_t now = esp_timer_get_time() / 1000;
             if (mutex)
                 xSemaphoreTake(mutex, portMAX_DELAY);
-
             for (auto &[uid, dev] : devices::registry)
             {
                 int64_t diff = (int64_t)now - (int64_t)dev.last_seen;
-                if (diff < 0)
-                    diff = 0;
                 if (dev.reachable && diff > OFFLINE_TIMEOUT_MS)
                 {
                     dev.reachable = false;
@@ -106,13 +133,13 @@ namespace bridge
                         devices::report_reachable(ep, false);
                 }
             }
-
             if (mutex)
                 xSemaphoreGive(mutex);
-            vTaskDelay(pdMS_TO_TICKS(500));
         }
 
         close(sock);
+        udp_sock = -1;
+        udp_task_handle = nullptr;
         vTaskDelete(NULL);
     }
 
