@@ -29,7 +29,7 @@ namespace devices
         bool reachable;
         bool command_support = true;
         std::map<std::string, endpoint_t *> endpoints;
-        std::vector<std::string> type_order; // <-- NEW: preserve creation order
+        std::vector<std::string> type_order;
         cJSON *data = nullptr;
     };
 
@@ -307,7 +307,7 @@ namespace devices
                 }
 
                 endpoint_t *ep = nullptr;
-                // try create and check
+                
                 ep = it->second(node, uid + "_" + type);
                 if (!ep)
                 {
@@ -330,7 +330,7 @@ namespace devices
                     dev.type_order.push_back(type);
                 report_reachable(ep, true);
 
-                // persistir
+
                 device_nvs_data_t data;
                 data.uid = uid;
                 data.ip = ip;

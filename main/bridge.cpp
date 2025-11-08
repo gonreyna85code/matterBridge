@@ -1,13 +1,9 @@
-// bridge.cpp
 #include "bridge.h"
 #include "devices.h"
 #include <esp_log.h>
 #include <lwip/sockets.h>
 #include <fcntl.h>
 #include <sys/select.h>
-
-using namespace esp_matter;
-using namespace esp_matter::endpoint;
 
 namespace bridge
 {
