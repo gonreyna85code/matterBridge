@@ -14,7 +14,6 @@
 #include <esp_timer.h>
 #include <esp_rom_sys.h>
 #include <inttypes.h>
-#include <wired.h>
 #include <bridge.h>
 #include <webserver.h>
 
@@ -23,10 +22,8 @@ using namespace esp_matter::attribute;
 using namespace esp_matter::endpoint;
 using namespace esp_matter::cluster;
 using namespace bridge;
-using namespace wired;
 
 static const char *TAG = "app_main";
-static endpoint_t *led_ep_global = nullptr;
 
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
@@ -58,27 +55,16 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     }
 }
 
-static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id, uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
+static esp_err_t app_attribute_update_cb(callback_type_t type, uint16_t endpoint_id, uint32_t cluster_id,
+                                         uint32_t attribute_id, esp_matter_attr_val_t *val, void *priv_data)
 {
-    if (type == PRE_UPDATE)
-    {
-        ESP_LOGI(TAG, "Pre update → Endpoint=0x%X, Cluster=0x%lX, Attribute=0x%lX",
-                 endpoint_id, cluster_id, attribute_id);
-    }
-    uint16_t encoder_id = endpoint::get_id(led_ep_global);
+    esp_err_t err = ESP_OK;
 
-    if (endpoint_id == encoder_id)
-    {
-        ESP_LOGI(TAG, "→ Dispatch to wired handler");
-        wired::handle_attribute_update(endpoint_id, cluster_id, attribute_id, val);
-        return ESP_OK;
-    }
-    else
-    {
+    if (type == PRE_UPDATE) {
         ESP_LOGI(TAG, "→ Dispatch to bridge handler");
         bridge::handle_attribute_update(endpoint_id, cluster_id, attribute_id, val);
-        return ESP_OK;
     }
+    return err;
 }
 
 extern "C" void app_main()
@@ -91,8 +77,6 @@ extern "C" void app_main()
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
-    // --- Init de tus módulos ---
-    wired::pwm_init();
     
     /* Create a Matter node and add the mandatory Root Node device type on endpoint 0 */
     node::config_t node_config;
@@ -103,90 +87,18 @@ extern "C" void app_main()
     aggregator::config_t aggregator_config;
     endpoint_t *aggregator = endpoint::aggregator::create(node, &aggregator_config, ENDPOINT_FLAG_NONE, NULL);
     ABORT_APP_ON_FAILURE(aggregator != nullptr, ESP_LOGE(TAG, "Failed to create aggregator endpoint"));
-
-    temperature_sensor::config_t temp_sensor_config;
-    endpoint_t *temp_ep = temperature_sensor::create(node, &temp_sensor_config, ENDPOINT_FLAG_NONE, NULL);
-    // Cluster BridgedDeviceBasicInformation
-    cluster::bridged_device_basic_information::config_t basic_info_cfg{};
-    cluster::bridged_device_basic_information::create(temp_ep, &basic_info_cfg, CLUSTER_FLAG_SERVER);
-    uint16_t ep_id = endpoint::get_id(temp_ep);
-    attribute_t *node_label_attr = attribute::get(
-        ep_id,
-        chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-        chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-    if (node_label_attr)
-    {
-        esp_matter_attr_val_t val = esp_matter_char_str("temperature", strlen("temperature"));
-        attribute::set_val(node_label_attr, &val);
-        attribute::report(ep_id,
-                          chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                          chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                          &val);
-    }
-    ABORT_APP_ON_FAILURE(temp_ep != nullptr, ESP_LOGE(TAG, "Failed to create temperature_sensor endpoint"));
-
-    // Humidity sensor
-    humidity_sensor::config_t humidity_sensor_config;
-    endpoint_t *hum_ep = humidity_sensor::create(node, &humidity_sensor_config, ENDPOINT_FLAG_NONE, NULL);
-    // Cluster BridgedDeviceBasicInformation
-    cluster::bridged_device_basic_information::config_t basic_info2_cfg{};
-    cluster::bridged_device_basic_information::create(hum_ep, &basic_info2_cfg, CLUSTER_FLAG_SERVER);
-    uint16_t ep_id2 = endpoint::get_id(hum_ep);
-
-    attribute_t *node_label_attr2 = attribute::get(
-        ep_id2,
-        chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-        chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-    if (node_label_attr2)
-    {
-        esp_matter_attr_val_t val2 = esp_matter_char_str("humidity", strlen("humidity"));
-        attribute::set_val(node_label_attr2, &val2);
-        attribute::report(ep_id2,
-                          chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                          chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                          &val2);
-    }
-    ABORT_APP_ON_FAILURE(hum_ep != nullptr, ESP_LOGE(TAG, "Failed to create humidity_sensor endpoint"));
-
-    wired::start_aht10(temp_ep, hum_ep);
-
-    // Led endpoint (remote dimmer switch)
-    dimmable_light::config_t bridge_config{};
-    endpoint_t *ep = dimmable_light::create(node, &bridge_config, ENDPOINT_FLAG_NONE, nullptr);
-    cluster::bridged_device_basic_information::config_t basic_info3_cfg{};
-    cluster::bridged_device_basic_information::create(ep, &basic_info3_cfg, CLUSTER_FLAG_SERVER);
-    led_ep_global = ep;
-    uint16_t ep_id3 = endpoint::get_id(ep);
-    attribute_t *node_label_attr3 = attribute::get(
-        ep_id3,
-        chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-        chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id);
-    if (node_label_attr3)
-    {
-        esp_matter_attr_val_t val = esp_matter_char_str("dimmable_light", strlen("dimmable_light"));
-        attribute::set_val(node_label_attr3, &val);
-        attribute::report(ep_id3,
-                          chip::app::Clusters::BridgedDeviceBasicInformation::Id,
-                          chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::NodeLabel::Id,
-                          &val);
-    }
-    ABORT_APP_ON_FAILURE(ep != nullptr, ESP_LOGE(TAG, "Failed to create led endpoint"));
-
+    
     /* Restore previously created endpoints */
     bridge::init(node);
     
-
     /* Matter start */
     err = esp_matter::start(app_event_cb);
     ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
-
-    
 
     // --- Start WebGUI ---
     static webgui::config_t cfg;
     cfg.bridge_name = "Matter Bridge v2.0";
     cfg.udp_port = 12345;
     cfg.offline_timeout_ms = 60000;
-
     webgui::start(&bridge::get_device_map(), &cfg);
 }

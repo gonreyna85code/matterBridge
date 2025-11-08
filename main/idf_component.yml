@@ -15,4 +15,3 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
 
-  esp-idf-lib/aht: ^1.0.8

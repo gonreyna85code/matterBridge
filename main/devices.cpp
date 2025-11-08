@@ -250,9 +250,7 @@ namespace devices
         return ESP_OK;
     }
 
-    void create_or_update(const std::string &ip, node_t *node, const std::string &json_str)
-    {
-    
+    void create_or_update(const std::string &ip, node_t *node, const std::string &json_str){  
         cJSON *root = cJSON_Parse(json_str.c_str());
         if (!root)
         {
@@ -312,9 +310,6 @@ namespace devices
                     ESP_LOGE(TAG, "Creator returned NULL for uid=%s type=%s", uid.c_str(), type.c_str());
                     continue;
                 }
-
-                uint16_t id = endpoint::get_id(ep);                
-
                 dev.endpoints[type] = ep;
                 if (std::find(dev.type_order.begin(), dev.type_order.end(), type) == dev.type_order.end())
                     dev.type_order.push_back(type);
@@ -400,7 +395,7 @@ namespace devices
             return;
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(12346);
+        addr.sin_port = htons(13347);
         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
         sendto(sock, payload.c_str(), payload.size(), 0, (sockaddr *)&addr, sizeof(addr));
         close(sock);
