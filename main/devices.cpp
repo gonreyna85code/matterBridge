@@ -297,8 +297,6 @@ namespace devices
 
             if (dev.endpoints.find(type) == dev.endpoints.end())
             {
-                ESP_LOGW(TAG, "create_or_update: need to create endpoint for uid=%s type=%s", uid.c_str(), type.c_str());
-
                 auto it = creators.find(type);
                 if (it == creators.end())
                 {
@@ -315,21 +313,12 @@ namespace devices
                     continue;
                 }
 
-                uint16_t id = endpoint::get_id(ep);
-                if (id == 0)
-                {
-                    ESP_LOGW(TAG, "Created endpoint but id==0 for uid=%s type=%s (possible creation error)", uid.c_str(), type.c_str());
-                }
-                else
-                {
-                    ESP_LOGW(TAG, "Created endpoint id=%u for uid=%s type=%s", id, uid.c_str(), type.c_str());
-                }
+                uint16_t id = endpoint::get_id(ep);                
 
                 dev.endpoints[type] = ep;
                 if (std::find(dev.type_order.begin(), dev.type_order.end(), type) == dev.type_order.end())
                     dev.type_order.push_back(type);
                 report_reachable(ep, true);
-
 
                 device_nvs_data_t data;
                 data.uid = uid;

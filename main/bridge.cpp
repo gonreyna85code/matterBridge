@@ -12,8 +12,7 @@ namespace bridge
     static TaskHandle_t udp_task_handle = nullptr;
     static uint32_t startup_delay_ms = 60000;
     static int udp_sock = -1;
-    static esp_matter::node_t *node_global = nullptr;
-    
+    static esp_matter::node_t *node_global = nullptr;    
     
     void init(esp_matter::node_t *node)
     {
@@ -73,13 +72,12 @@ namespace bridge
 
         while (true)
         {
-            // select con timeout -> event-driven y permite stop rápido
             fd_set readfds;
             FD_ZERO(&readfds);
             FD_SET(sock, &readfds);
 
             struct timeval tv;
-            tv.tv_sec = 1; // housekeeping cada 1s
+            tv.tv_sec = 1;
             tv.tv_usec = 0;
 
             int sel = select(sock + 1, &readfds, NULL, NULL, &tv);            
@@ -113,8 +111,7 @@ namespace bridge
                     }
                 }
             }
-
-            // housekeeping (una vez por segundo gracias al timeout)
+            
             uint64_t now = esp_timer_get_time() / 1000;
             if (mutex)
                 xSemaphoreTake(mutex, portMAX_DELAY);
@@ -123,8 +120,7 @@ namespace bridge
                 int64_t diff = (int64_t)now - (int64_t)dev.last_seen;
                 if (dev.reachable && diff > OFFLINE_TIMEOUT_MS)
                 {
-                    dev.reachable = false;
-                    ESP_LOGW(TAG, "Device %s is now OFFLINE", uid.c_str());
+                    dev.reachable = false;                    
                     for (auto &[type, ep] : dev.endpoints)
                         devices::report_reachable(ep, false);
                 }
@@ -132,7 +128,6 @@ namespace bridge
             if (mutex)
                 xSemaphoreGive(mutex);
         }
-
         close(sock);
         udp_sock = -1;
         udp_task_handle = nullptr;
