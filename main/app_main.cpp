@@ -15,7 +15,7 @@
 #include <esp_rom_sys.h>
 #include <inttypes.h>
 #include <bridge.h>
-#include <webserver.h>
+
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -93,12 +93,5 @@ extern "C" void app_main()
     
     /* Matter start */
     err = esp_matter::start(app_event_cb);
-    ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));
-
-    // --- Start WebGUI ---
-    static webgui::config_t cfg;
-    cfg.bridge_name = "Matter Bridge v2.0";
-    cfg.udp_port = 12345;
-    cfg.offline_timeout_ms = 60000;
-    webgui::start(&bridge::get_device_map(), &cfg);
+    ABORT_APP_ON_FAILURE(err == ESP_OK, ESP_LOGE(TAG, "Failed to start Matter, err:%d", err));    
 }

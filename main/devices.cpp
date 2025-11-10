@@ -10,6 +10,7 @@
 #include <nvs.h>
 #include <lwip/sockets.h>
 #include <math.h>
+#include "webserver.h"
 
 using namespace esp_matter;
 using namespace esp_matter::endpoint;
@@ -20,18 +21,7 @@ namespace devices
     static const char *TAG = "DEVICES";
     static const char *NVS_NAMESPACE = "devices";
 
-    struct device_t
-    {
-        std::string uid;
-        std::string ip;
-        node_t *node;
-        time_t last_seen;
-        bool reachable;
-        bool command_support = true;
-        std::map<std::string, endpoint_t *> endpoints;
-        std::vector<std::string> type_order;
-        cJSON *data = nullptr;
-    };
+    
 
     struct device_nvs_data_t
     {
@@ -250,7 +240,46 @@ namespace devices
         return ESP_OK;
     }
 
-    void create_or_update(const std::string &ip, node_t *node, const std::string &json_str){  
+    esp_err_t remove_endpoint(const std::string &uid, const std::string &type)
+    {
+        auto dev_it = registry.find(uid);
+        if (dev_it == registry.end())
+            return ESP_ERR_NOT_FOUND;
+
+        auto &dev = dev_it->second;
+
+        auto ep_it = dev.endpoints.find(type);
+        if (ep_it == dev.endpoints.end())
+            return ESP_ERR_NOT_FOUND;
+
+        endpoint_t *ep = ep_it->second;
+        if (ep)
+        {
+            endpoint::destroy(dev.node, ep);
+        }
+
+        dev.endpoints.erase(type);
+
+        auto new_end = std::vector<std::string>{};
+        for (auto &t : dev.type_order)
+            if (t != type)
+                new_end.push_back(t);
+        dev.type_order.swap(new_end);
+
+        device_nvs_data_t data;
+        data.uid = dev.uid;
+        data.ip = dev.ip;
+        for (auto &t : dev.type_order)
+            data.type.push_back(t);
+
+        save_device_to_nvs(data);
+
+        ESP_LOGI(TAG, "Removed endpoint '%s' from device '%s'", type.c_str(), uid.c_str());
+        return ESP_OK;
+    }
+
+    void create_or_update(const std::string &ip, node_t *node, const std::string &json_str)
+    {
         cJSON *root = cJSON_Parse(json_str.c_str());
         if (!root)
         {
@@ -303,7 +332,7 @@ namespace devices
                 }
 
                 endpoint_t *ep = nullptr;
-                
+
                 ep = it->second(node, uid + "_" + type);
                 if (!ep)
                 {
@@ -321,7 +350,7 @@ namespace devices
                 for (auto &t : dev.type_order)
                     data.type.push_back(t);
                 save_device_to_nvs(data);
-            }            
+            }
         }
 
         cJSON *data = cJSON_GetObjectItem(root, "data");
@@ -395,7 +424,8 @@ namespace devices
             return;
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(13347);
+        int32_t command_port = webgui::cfg.command_port;
+        addr.sin_port = htons(command_port);
         inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
         sendto(sock, payload.c_str(), payload.size(), 0, (sockaddr *)&addr, sizeof(addr));
         close(sock);

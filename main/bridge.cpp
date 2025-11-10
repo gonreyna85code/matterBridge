@@ -4,6 +4,7 @@
 #include <lwip/sockets.h>
 #include <fcntl.h>
 #include <sys/select.h>
+#include "webserver.h"
 
 namespace bridge
 {
@@ -12,20 +13,20 @@ namespace bridge
     static TaskHandle_t udp_task_handle = nullptr;
     static uint32_t startup_delay_ms = 60000;
     static int udp_sock = -1;
-    static esp_matter::node_t *node_global = nullptr;    
+    static esp_matter::node_t *node_global = nullptr;
+
     
     void init(esp_matter::node_t *node)
     {
         if (!mutex)
             mutex = xSemaphoreCreateMutex();
-
         node_global = node;
-        
-        // arranca udp después de startup_delay_ms (permite que Matter recree endpoints)
-        startup_delay_ms = 120000;        
-        xTaskCreate(udp_task, "bridge_udp_task", 4096, node, 5, &udp_task_handle);
         devices::init_types();
         devices::load_devices_from_nvs(node);
+        webgui::load_config(webgui::cfg);
+        startup_delay_ms = 120000;        
+        xTaskCreate(udp_task, "bridge_udp_task", 8192, node, 5, &udp_task_handle);        
+        webgui::start(&bridge::get_device_map());
     }
 
     const std::map<std::string, devices::device_t> &get_device_map()
@@ -35,10 +36,9 @@ namespace bridge
 
     void udp_task(void *pvParameters)
     {
-        esp_matter::node_t *node = (esp_matter::node_t *)pvParameters;        
+        esp_matter::node_t *node = (esp_matter::node_t *)pvParameters;
 
-        if (startup_delay_ms > 0)
-            vTaskDelay(pdMS_TO_TICKS(startup_delay_ms));
+        vTaskDelay(pdMS_TO_TICKS(startup_delay_ms));
 
         int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (sock < 0)
@@ -48,10 +48,10 @@ namespace bridge
             vTaskDelete(NULL);
             return;
         }
-
+        int32_t port = webgui::cfg.broadcast_port;
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(13345);
+        addr.sin_port = htons(port);
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
         if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
@@ -66,7 +66,7 @@ namespace bridge
         ESP_LOGI(TAG, "UDP listener ready");
 
         udp_sock = sock;
-        constexpr uint64_t OFFLINE_TIMEOUT_MS = 120000; // 120s
+        int32_t OFFLINE_TIMEOUT_MS = webgui::cfg.offline_timeout_ms;
         constexpr size_t BUF_SIZE = 1024;
         char buf[BUF_SIZE];
 
@@ -80,7 +80,7 @@ namespace bridge
             tv.tv_sec = 1;
             tv.tv_usec = 0;
 
-            int sel = select(sock + 1, &readfds, NULL, NULL, &tv);            
+            int sel = select(sock + 1, &readfds, NULL, NULL, &tv);
 
             if (sel > 0 && FD_ISSET(sock, &readfds))
             {
@@ -111,7 +111,7 @@ namespace bridge
                     }
                 }
             }
-            
+
             uint64_t now = esp_timer_get_time() / 1000;
             if (mutex)
                 xSemaphoreTake(mutex, portMAX_DELAY);
@@ -120,7 +120,7 @@ namespace bridge
                 int64_t diff = (int64_t)now - (int64_t)dev.last_seen;
                 if (dev.reachable && diff > OFFLINE_TIMEOUT_MS)
                 {
-                    dev.reachable = false;                    
+                    dev.reachable = false;
                     for (auto &[type, ep] : dev.endpoints)
                         devices::report_reachable(ep, false);
                 }
