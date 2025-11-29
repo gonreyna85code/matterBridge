@@ -21,8 +21,6 @@ namespace devices
     static const char *TAG = "DEVICES";
     static const char *NVS_NAMESPACE = "devices";
 
-    
-
     struct device_nvs_data_t
     {
         std::string uid;
@@ -40,9 +38,22 @@ namespace devices
     static const std::map<std::string, cluster_map_t> type_map = {
         {"REL0", {chip::app::Clusters::OnOff::Id, chip::app::Clusters::OnOff::Attributes::OnOff::Id, 1.0f}},
         {"REL1", {chip::app::Clusters::OnOff::Id, chip::app::Clusters::OnOff::Attributes::OnOff::Id, 1.0f}},
+        {"REL2", {chip::app::Clusters::OnOff::Id, chip::app::Clusters::OnOff::Attributes::OnOff::Id, 1.0f}},
+        {"REL3", {chip::app::Clusters::OnOff::Id, chip::app::Clusters::OnOff::Attributes::OnOff::Id, 1.0f}},
+        {"REL4", {chip::app::Clusters::OnOff::Id, chip::app::Clusters::OnOff::Attributes::OnOff::Id, 1.0f}},
+        {"REL5", {chip::app::Clusters::OnOff::Id, chip::app::Clusters::OnOff::Attributes::OnOff::Id, 1.0f}},
+        {"REL6", {chip::app::Clusters::OnOff::Id, chip::app::Clusters::OnOff::Attributes::OnOff::Id, 1.0f}},
+        {"REL7", {chip::app::Clusters::OnOff::Id, chip::app::Clusters::OnOff::Attributes::OnOff::Id, 1.0f}},
+        {"DIM0", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
+        {"DIM1", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
+        {"DIM2", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
+        {"DIM3", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
+        {"DIM4", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
+        {"DIM5", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
+        {"DIM6", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
+        {"DIM7", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
         {"TEMP", {chip::app::Clusters::TemperatureMeasurement::Id, chip::app::Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Id, 100.0f}},
-        {"HUMI", {chip::app::Clusters::RelativeHumidityMeasurement::Id, chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, 100.0f}},
-        {"DIMM", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
+        {"HUMI", {chip::app::Clusters::RelativeHumidityMeasurement::Id, chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, 100.0f}},        
         {"LUMI", {chip::app::Clusters::IlluminanceMeasurement::Id, chip::app::Clusters::IlluminanceMeasurement::Attributes::MeasuredValue::Id, 1000.0f / 65535.0f}}};
 
     using creator_t = std::function<endpoint_t *(node_t *, const std::string &)>;
@@ -519,17 +530,17 @@ namespace devices
         return ESP_OK;
     }
 
-    void init_REL0_type()
+    void init_LUMI_type()
     {
-        register_device_type("REL0", [](node_t *n, const std::string &uid) -> endpoint_t *
+        register_device_type("LUMI", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
-                                on_off_plugin_unit::config_t on_off_config;    
-                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
-                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
-                                endpoint::enable(ep0);
-                                return ep0; });
+                                light_sensor::config_t light_sensor_config;
+                                auto ep4 = endpoint::light_sensor::create(n, &light_sensor_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);                   
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg4{};
+                                cluster_t *basic_cl4 = cluster::bridged_device_basic_information::create(ep4, &basic_info_cfg4, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl4, "Luminosity", strlen("Luminosity"));
+                                endpoint::enable(ep4);
+                                return ep4; });
     }
 
     void init_TEMP_type()
@@ -558,9 +569,113 @@ namespace devices
                                 return ep2; });
     }
 
-    void init_DIMM_type()
+    void init_REL0_type()
     {
-        register_device_type("DIMM", [](node_t *n, const std::string &uid) -> endpoint_t *
+        register_device_type("REL0", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                on_off_plugin_unit::config_t on_off_config;    
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
+                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                endpoint::enable(ep0);
+                                return ep0; });
+    }
+
+    void init_REL1_type()
+    {
+        register_device_type("REL1", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                on_off_plugin_unit::config_t on_off_config;    
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
+                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                endpoint::enable(ep0);
+                                return ep0; });
+    }
+
+    void init_REL2_type()
+    {
+        register_device_type("REL2", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                on_off_plugin_unit::config_t on_off_config;    
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
+                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                endpoint::enable(ep0);
+                                return ep0; });
+    }
+
+    void init_REL3_type()
+    {
+        register_device_type("REL3", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                on_off_plugin_unit::config_t on_off_config;    
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
+                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                endpoint::enable(ep0);
+                                return ep0; });
+    }
+
+    void init_REL4_type()
+    {
+        register_device_type("REL4", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                on_off_plugin_unit::config_t on_off_config;    
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
+                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                endpoint::enable(ep0);
+                                return ep0; });
+    }
+
+    void init_REL5_type()
+    {
+        register_device_type("REL5", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                on_off_plugin_unit::config_t on_off_config;    
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
+                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                endpoint::enable(ep0);
+                                return ep0; });
+    }
+
+    void init_REL6_type()
+    {
+        register_device_type("REL6", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                on_off_plugin_unit::config_t on_off_config;    
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
+                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                endpoint::enable(ep0);
+                                return ep0; });
+    }
+
+    void init_REL7_type()
+    {
+        register_device_type("REL7", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                on_off_plugin_unit::config_t on_off_config;    
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
+                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                endpoint::enable(ep0);
+                                return ep0; });
+    }
+  
+    void init_DIM0_type()
+    {
+        register_device_type("DIM0", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
                                 dimmable_plugin_unit::config_t dimmable_plugin_config;
                                 auto ep3 = endpoint::dimmable_plugin_unit::create(n, &dimmable_plugin_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
@@ -571,19 +686,97 @@ namespace devices
                                 return ep3; });
     }
 
-    void init_LUMI_type()
+    void init_DIM1_type()
     {
-        register_device_type("LUMI", [](node_t *n, const std::string &uid) -> endpoint_t *
+        register_device_type("DIM1", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
-                                light_sensor::config_t light_sensor_config;
-                                auto ep4 = endpoint::light_sensor::create(n, &light_sensor_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);                   
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg4{};
-                                cluster_t *basic_cl4 = cluster::bridged_device_basic_information::create(ep4, &basic_info_cfg4, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl4, "Luminosity", strlen("Luminosity"));
-                                endpoint::enable(ep4);
-                                return ep4; });
+                                dimmable_plugin_unit::config_t dimmable_plugin_config;
+                                auto ep3 = endpoint::dimmable_plugin_unit::create(n, &dimmable_plugin_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg3{};
+                                cluster_t *basic_cl3 = cluster::bridged_device_basic_information::create(ep3, &basic_info_cfg3, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl3, "Dimmer", strlen("Dimmer"));
+                                endpoint::enable(ep3);
+                                return ep3; });
     }
 
+    void init_DIM2_type()
+    {
+        register_device_type("DIM2", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                dimmable_plugin_unit::config_t dimmable_plugin_config;
+                                auto ep3 = endpoint::dimmable_plugin_unit::create(n, &dimmable_plugin_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg3{};
+                                cluster_t *basic_cl3 = cluster::bridged_device_basic_information::create(ep3, &basic_info_cfg3, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl3, "Dimmer", strlen("Dimmer"));
+                                endpoint::enable(ep3);
+                                return ep3; });
+    }
+
+    void init_DIM3_type()
+    {
+        register_device_type("DIM3", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                dimmable_plugin_unit::config_t dimmable_plugin_config;
+                                auto ep3 = endpoint::dimmable_plugin_unit::create(n, &dimmable_plugin_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg3{};
+                                cluster_t *basic_cl3 = cluster::bridged_device_basic_information::create(ep3, &basic_info_cfg3, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl3, "Dimmer", strlen("Dimmer"));
+                                endpoint::enable(ep3);
+                                return ep3; });
+    }
+
+    void init_DIM4_type()
+    {
+        register_device_type("DIM4", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                dimmable_plugin_unit::config_t dimmable_plugin_config;
+                                auto ep3 = endpoint::dimmable_plugin_unit::create(n, &dimmable_plugin_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg3{};
+                                cluster_t *basic_cl3 = cluster::bridged_device_basic_information::create(ep3, &basic_info_cfg3, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl3, "Dimmer", strlen("Dimmer"));
+                                endpoint::enable(ep3);
+                                return ep3; });
+    }
+
+    void init_DIM5_type()
+    {
+        register_device_type("DIM5", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                dimmable_plugin_unit::config_t dimmable_plugin_config;
+                                auto ep3 = endpoint::dimmable_plugin_unit::create(n, &dimmable_plugin_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg3{};
+                                cluster_t *basic_cl3 = cluster::bridged_device_basic_information::create(ep3, &basic_info_cfg3, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl3, "Dimmer", strlen("Dimmer"));
+                                endpoint::enable(ep3);
+                                return ep3; });
+    }
+
+    void init_DIM6_type()
+    {
+        register_device_type("DIM6", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                dimmable_plugin_unit::config_t dimmable_plugin_config;
+                                auto ep3 = endpoint::dimmable_plugin_unit::create(n, &dimmable_plugin_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg3{};
+                                cluster_t *basic_cl3 = cluster::bridged_device_basic_information::create(ep3, &basic_info_cfg3, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl3, "Dimmer", strlen("Dimmer"));
+                                endpoint::enable(ep3);
+                                return ep3; });
+    }
+
+    void init_DIM7_type()
+    {
+        register_device_type("DIM7", [](node_t *n, const std::string &uid) -> endpoint_t *
+                             {
+                                dimmable_plugin_unit::config_t dimmable_plugin_config;
+                                auto ep3 = endpoint::dimmable_plugin_unit::create(n, &dimmable_plugin_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg3{};
+                                cluster_t *basic_cl3 = cluster::bridged_device_basic_information::create(ep3, &basic_info_cfg3, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl3, "Dimmer", strlen("Dimmer"));
+                                endpoint::enable(ep3);
+                                return ep3; });
+    }
+    
     void init_types()
     {
         esp_err_t err = nvs_flash_init();
@@ -592,11 +785,25 @@ namespace devices
             nvs_flash_erase();
             nvs_flash_init();
         }
-        init_REL0_type();
         init_TEMP_type();
         init_HUMI_type();
-        init_DIMM_type();
         init_LUMI_type();
+        init_REL0_type();
+        init_REL1_type();
+        init_REL2_type();
+        init_REL3_type();
+        init_REL4_type();
+        init_REL5_type();
+        init_REL6_type();
+        init_REL7_type();        
+        init_DIM0_type();
+        init_DIM1_type();
+        init_DIM2_type();
+        init_DIM3_type();
+        init_DIM4_type();
+        init_DIM5_type();
+        init_DIM6_type();
+        init_DIM7_type();
     }
 
 } // namespace devices

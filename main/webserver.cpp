@@ -36,7 +36,7 @@ namespace webgui
         html << "<h2>" << webgui::cfg.bridge_name << "</h2>";
 
         html << "<table><tr>"
-             << "<th>UID</th><th>Endpoint</th><th>IP</th><th>Status</th><th>Last seen (s)</th><th>Open</th><th>Remove</th>"
+             << "<th>UID</th><th>Endpoint</th><th>IP</th><th>Status</th><th>Last seen (s)</th><th>Settings</th><th>Remove</th>"
              << "</tr>";
 
         if (g_device_map && !g_device_map->empty())
