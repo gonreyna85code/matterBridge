@@ -10,8 +10,8 @@ namespace webgui
     struct config_t
     {
         std::string bridge_name = "AntiMatter Bridge";
-        int32_t broadcast_port = 13345;
-        int32_t command_port = 13346;
+        int32_t broadcast_port = 12345;
+        int32_t command_port = 12346;
         int32_t offline_timeout_ms = 120000;
     };
 
