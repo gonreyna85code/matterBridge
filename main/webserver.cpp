@@ -60,7 +60,7 @@ namespace webgui
                     html << "<td>" << age << "</td>";
 
                     if (!d.ip.empty())
-                        html << "<td><a href='http://" << d.ip << "' target='_blank'>Open</a></td>";
+                        html << "<td><a href='http://" << d.ip << "' target='_blank'>⚙️</a></td>";
                     else
                         html << "<td>-</td>";
 
