@@ -21,11 +21,17 @@ namespace devices
     static const char *TAG = "DEVICES";
     static const char *NVS_NAMESPACE = "devices";
 
+    struct device_nvs_endpoint_t
+    {
+        std::string type;
+        uint16_t endpoint_id;
+    };
+
     struct device_nvs_data_t
     {
         std::string uid;
         std::string ip;
-        std::vector<std::string> type;
+        std::vector<device_nvs_endpoint_t> endpoints;
     };
 
     struct cluster_map_t
@@ -53,7 +59,7 @@ namespace devices
         {"DIM6", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
         {"DIM7", {chip::app::Clusters::LevelControl::Id, chip::app::Clusters::LevelControl::Attributes::CurrentLevel::Id, 1.0f}},
         {"TEMP", {chip::app::Clusters::TemperatureMeasurement::Id, chip::app::Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Id, 100.0f}},
-        {"HUMI", {chip::app::Clusters::RelativeHumidityMeasurement::Id, chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, 100.0f}},        
+        {"HUMI", {chip::app::Clusters::RelativeHumidityMeasurement::Id, chip::app::Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, 100.0f}},
         {"LUMI", {chip::app::Clusters::IlluminanceMeasurement::Id, chip::app::Clusters::IlluminanceMeasurement::Attributes::MeasuredValue::Id, 1000.0f / 65535.0f}}};
 
     using creator_t = std::function<endpoint_t *(node_t *, const std::string &)>;
@@ -81,10 +87,18 @@ namespace devices
         cJSON_AddStringToObject(root, "uid", device_data.uid.c_str());
         cJSON_AddStringToObject(root, "ip", device_data.ip.c_str());
 
-        cJSON *types = cJSON_CreateArray();
-        for (auto &t : device_data.type)
-            cJSON_AddItemToArray(types, cJSON_CreateString(t.c_str()));
-        cJSON_AddItemToObject(root, "type", types);
+        cJSON *eps = cJSON_CreateArray();
+        for (auto &e : device_data.endpoints)
+        {
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "type", e.type.c_str());
+            if (e.endpoint_id != 0)
+            {
+                cJSON_AddNumberToObject(item, "endpoint_id", e.endpoint_id);
+            }
+            cJSON_AddItemToArray(eps, item);
+        }
+        cJSON_AddItemToObject(root, "endpoints", eps);
 
         char *json = cJSON_PrintUnformatted(root);
         err = nvs_set_str(nvs_handle, key.c_str(), json);
@@ -114,7 +128,7 @@ namespace devices
                 chip::app::Clusters::BridgedDeviceBasicInformation::Attributes::Reachable::Id,
                 &val);
         }
-    }
+    }    
 
     esp_err_t load_devices_from_nvs(node_t *node)
     {
@@ -123,10 +137,9 @@ namespace devices
         if (err != ESP_OK)
         {
             ESP_LOGI(TAG, "NVS namespace doesn't exist yet. It will be created on first device add.");
-            return ESP_OK; // This is not an error, just means that there are no devices saved yet
+            return ESP_OK;
         }
 
-        // Iterate over all keys in the namespace
         size_t key_count = 0;
         nvs_iterator_t it = NULL;
         err = nvs_entry_find("nvs", NVS_NAMESPACE, NVS_TYPE_STR, &it);
@@ -145,7 +158,6 @@ namespace devices
             {
                 key_count++;
 
-                // Read the JSON string from NVS
                 char *json_str = NULL;
                 size_t required_size;
                 err = nvs_get_str(nvs_handle, info.key, NULL, &required_size);
@@ -169,7 +181,6 @@ namespace devices
                     return err;
                 }
 
-                // Parse the JSON string
                 cJSON *root = cJSON_Parse(json_str);
                 free(json_str);
                 if (!root)
@@ -181,11 +192,12 @@ namespace devices
 
                 cJSON *uid_j = cJSON_GetObjectItem(root, "uid");
                 cJSON *ip_j = cJSON_GetObjectItem(root, "ip");
-                cJSON *types_j = cJSON_GetObjectItem(root, "type");
+                cJSON *endpoints_j = cJSON_GetObjectItem(root, "endpoints");
+                cJSON *types_j = cJSON_GetObjectItem(root, "type"); // legacy support
 
-                if (!cJSON_IsString(uid_j) || !cJSON_IsString(ip_j) || !cJSON_IsArray(types_j))
+                if (!cJSON_IsString(uid_j) || !cJSON_IsString(ip_j) || !(cJSON_IsArray(endpoints_j) || cJSON_IsArray(types_j)))
                 {
-                    ESP_LOGE(TAG, "Invalid JSON format in NVS");
+                    ESP_LOGE(TAG, "Invalid JSON format in NVS (expect uid/ip/endpoints)");
                     cJSON_Delete(root);
                     nvs_close(nvs_handle);
                     return ESP_FAIL;
@@ -193,50 +205,79 @@ namespace devices
 
                 std::string uid = uid_j->valuestring;
                 std::string ip = ip_j->valuestring;
-                std::vector<std::string> type;
+                std::vector<device_nvs_endpoint_t> endpoints;
 
-                cJSON *type_elem = NULL;
-                cJSON_ArrayForEach(type_elem, types_j)
+                // New format: endpoints array of objects {type, endpoint_id?}
+                if (cJSON_IsArray(endpoints_j))
                 {
-                    if (cJSON_IsString(type_elem))
+                    cJSON *ep_elem = NULL;
+                    cJSON_ArrayForEach(ep_elem, endpoints_j)
                     {
-                        type.push_back(type_elem->valuestring);
+                        if (cJSON_IsObject(ep_elem))
+                        {
+                            cJSON *t = cJSON_GetObjectItem(ep_elem, "type");
+                            cJSON *eid = cJSON_GetObjectItem(ep_elem, "endpoint_id");
+                            if (cJSON_IsString(t))
+                            {
+                                device_nvs_endpoint_t e;
+                                e.type = t->valuestring;
+                                e.endpoint_id = (cJSON_IsNumber(eid) ? (uint16_t)eid->valueint : 0);
+                                endpoints.push_back(e);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Legacy format: "type": ["REL0","REL1"...]
+                    cJSON *type_elem = NULL;
+                    cJSON_ArrayForEach(type_elem, types_j)
+                    {
+                        if (cJSON_IsString(type_elem))
+                        {
+                            device_nvs_endpoint_t e;
+                            e.type = type_elem->valuestring;
+                            e.endpoint_id = 0;
+                            endpoints.push_back(e);
+                        }
                     }
                 }
 
                 cJSON_Delete(root);
 
-                // Create the device and endpoints
+                // Build device_t
                 device_t dev;
                 dev.uid = uid;
                 dev.ip = ip;
                 dev.node = node;
                 dev.last_seen = 0;
                 dev.reachable = false;
-                dev.type_order = type;
+                dev.type_order.clear();
                 dev.data = nullptr;
 
-                // Create endpoints
-                for (const auto &type : type)
+                // Re-attach endpoints:
+                for (const auto &e : endpoints)
                 {
-                    auto it = creators.find(type);
-                    if (it != creators.end())
+                    auto itc = creators.find(e.type);
+                    if (itc != creators.end())
                     {
-                        endpoint_t *ep = it->second(node, uid + "_" + type); // Node is not available yet
-                        if (ep)
+                        endpoint_t *created = itc->second(node, uid + "_" + e.type);
+                        if (created)
                         {
-                            dev.endpoints[type] = ep;
-                            report_reachable(ep, false);
-                            ESP_LOGI(TAG, "Created endpoint type '%s' for %s from NVS", type.c_str(), uid.c_str());
+                            uint16_t created_id = endpoint::get_id(created);
+                            dev.endpoints[e.type] = created;
+                            dev.type_order.push_back(e.type);
+                            report_reachable(created, false);
+                            ESP_LOGI(TAG, "Created endpoint (no saved id) %u type '%s' for %s from NVS", created_id, e.type.c_str(), uid.c_str());
                         }
                         else
                         {
-                            ESP_LOGE(TAG, "Failed to create endpoint type '%s' from NVS", type.c_str());
+                            ESP_LOGE(TAG, "Failed to create endpoint type '%s' from NVS", e.type.c_str());
                         }
                     }
                     else
                     {
-                        ESP_LOGW(TAG, "No creator registered for type: %s", type.c_str());
+                        ESP_LOGW(TAG, "No creator registered for type: %s", e.type.c_str());
                     }
                 }
 
@@ -277,11 +318,18 @@ namespace devices
                 new_end.push_back(t);
         dev.type_order.swap(new_end);
 
+        // rebuild NVS payload including endpoint ids that remain
         device_nvs_data_t data;
         data.uid = dev.uid;
         data.ip = dev.ip;
         for (auto &t : dev.type_order)
-            data.type.push_back(t);
+        {
+            uint16_t id = 0;
+            auto it_ep = dev.endpoints.find(t);
+            if (it_ep != dev.endpoints.end() && it_ep->second)
+                id = endpoint::get_id(it_ep->second);
+            data.endpoints.push_back({t, id});
+        }
 
         save_device_to_nvs(data);
 
@@ -327,6 +375,7 @@ namespace devices
         }
 
         cJSON *type_elem = nullptr;
+        bool saved_any = false;
         cJSON_ArrayForEach(type_elem, types_j)
         {
             if (!cJSON_IsString(type_elem))
@@ -344,26 +393,43 @@ namespace devices
 
                 endpoint_t *ep = nullptr;
 
+                // Create endpoint using creator (first-time create). The created endpoint will get a stable id from esp-matter.
                 ep = it->second(node, uid + "_" + type);
                 if (!ep)
                 {
                     ESP_LOGE(TAG, "Creator returned NULL for uid=%s type=%s", uid.c_str(), type.c_str());
                     continue;
                 }
+
                 dev.endpoints[type] = ep;
                 if (std::find(dev.type_order.begin(), dev.type_order.end(), type) == dev.type_order.end())
                     dev.type_order.push_back(type);
                 report_reachable(ep, true);
 
+                // Persist endpoint id
                 device_nvs_data_t data;
                 data.uid = uid;
                 data.ip = ip;
                 for (auto &t : dev.type_order)
-                    data.type.push_back(t);
+                {
+                    uint16_t id = 0;
+                    auto it_ep = dev.endpoints.find(t);
+                    if (it_ep != dev.endpoints.end() && it_ep->second)
+                        id = endpoint::get_id(it_ep->second);
+                    data.endpoints.push_back({t, id});
+                }
                 save_device_to_nvs(data);
+                saved_any = true;
             }
         }
 
+        // optional: log when we persisted
+        if (saved_any)
+        {
+            ESP_LOGI(TAG, "Persisted device %s endpoints to NVS", uid.c_str());
+        }
+
+        // existing data handling unchanged...
         cJSON *data = cJSON_GetObjectItem(root, "data");
         if (data)
         {
@@ -399,7 +465,6 @@ namespace devices
                     float raw = static_cast<float>(field->valuedouble);
                     float scaled = raw * map.multiplier;
 
-                    // 🔹 Conversión especial para sensor de luz (LUMI)
                     if (type == "LUMI")
                     {
                         float lux = (field->valuedouble / 65535.0f) * 1000.0f;
@@ -409,7 +474,6 @@ namespace devices
                     }
                     else
                     {
-                        // Clamps para evitar overflow
                         if (scaled > 32767.0f)
                             scaled = 32767.0f;
                         if (scaled < 0.0f)
@@ -535,12 +599,12 @@ namespace devices
         register_device_type("LUMI", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
                                 light_sensor::config_t light_sensor_config;
-                                auto ep4 = endpoint::light_sensor::create(n, &light_sensor_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);                   
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg4{};
-                                cluster_t *basic_cl4 = cluster::bridged_device_basic_information::create(ep4, &basic_info_cfg4, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl4, "Luminosity", strlen("Luminosity"));
-                                endpoint::enable(ep4);
-                                return ep4; });
+                                auto epL = endpoint::light_sensor::create(n, &light_sensor_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);                   
+                                cluster::bridged_device_basic_information::config_t basic_info_cfgL{};
+                                cluster_t *basic_clL = cluster::bridged_device_basic_information::create(epL, &basic_info_cfgL, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_clL, "Luminosity", strlen("Luminosity"));
+                                endpoint::enable(epL);
+                                return epL; });
     }
 
     void init_TEMP_type()
@@ -548,12 +612,12 @@ namespace devices
         register_device_type("TEMP", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
                                 temperature_sensor::config_t temperature_sensor_config;
-                                auto ep1 = endpoint::temperature_sensor::create(n, &temperature_sensor_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg1{};
-                                cluster_t *basic_cl1 = cluster::bridged_device_basic_information::create(ep1, &basic_info_cfg1, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl1, "Temperature", strlen("Temperature"));                                   
-                                endpoint::enable(ep1);
-                                return ep1; });
+                                auto epT = endpoint::temperature_sensor::create(n, &temperature_sensor_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfgT{};
+                                cluster_t *basic_clT = cluster::bridged_device_basic_information::create(epT, &basic_info_cfgT, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_clT, "Temperature", strlen("Temperature"));                                   
+                                endpoint::enable(epT);
+                                return epT; });
     }
 
     void init_HUMI_type()
@@ -561,23 +625,29 @@ namespace devices
         register_device_type("HUMI", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
                                 humidity_sensor::config_t humidity_sensor_config;
-                                auto ep2 = endpoint::humidity_sensor::create(n, &humidity_sensor_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg2{};
-                                cluster_t *basic_cl2 = cluster::bridged_device_basic_information::create(ep2, &basic_info_cfg2, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl2, "Humidity", strlen("Humidity"));
-                                endpoint::enable(ep2);
-                                return ep2; });
+                                auto epH = endpoint::humidity_sensor::create(n, &humidity_sensor_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfgH{};
+                                cluster_t *basic_clH = cluster::bridged_device_basic_information::create(epH, &basic_info_cfgH, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_clH, "Humidity", strlen("Humidity"));
+                                endpoint::enable(epH);
+                                return epH; });
     }
 
     void init_REL0_type()
     {
         register_device_type("REL0", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
-                                on_off_plugin_unit::config_t on_off_config;    
-                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
-                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                on_off_plugin_unit::config_t cfg;
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &cfg, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t bicfg{};
+                                cluster_t *basic = cluster::bridged_device_basic_information::create(ep0, &bicfg, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic, "Outlet", strlen("Outlet"));
+                                std::string unique_id = uid + "_REL0";
+                                cluster::bridged_device_basic_information::attribute::create_unique_id(
+                                    basic,
+                                    const_cast<char *>(unique_id.c_str()),
+                                    unique_id.length()
+                                );
                                 endpoint::enable(ep0);
                                 return ep0; });
     }
@@ -586,24 +656,36 @@ namespace devices
     {
         register_device_type("REL1", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
-                                on_off_plugin_unit::config_t on_off_config;    
-                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
-                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
-                                endpoint::enable(ep0);
-                                return ep0; });
+                                on_off_plugin_unit::config_t on_off_config1;    
+                                auto ep1 = endpoint::on_off_plugin_unit::create(n, &on_off_config1, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg1{};
+                                cluster_t *basic_cl1 = cluster::bridged_device_basic_information::create(ep1, &basic_info_cfg1, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl1, "Outlet", strlen("Outlet"));
+                                std::string unique_id = uid + "_REL1";
+                                cluster::bridged_device_basic_information::attribute::create_unique_id(
+                                    basic_cl1,
+                                    const_cast<char *>(unique_id.c_str()),
+                                    unique_id.length()
+                                );
+                                endpoint::enable(ep1);
+                                return ep1; });
     }
 
     void init_REL2_type()
     {
         register_device_type("REL2", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
-                                on_off_plugin_unit::config_t on_off_config;    
-                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
-                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
+                                on_off_plugin_unit::config_t on_off_config2;    
+                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config2, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg2{};
+                                cluster_t *basic_cl2 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg2, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl2, "Outlet", strlen("Outlet"));
+                                std::string unique_id = uid + "_REL1";
+                                cluster::bridged_device_basic_information::attribute::create_unique_id(
+                                    basic_cl2,
+                                    const_cast<char *>(unique_id.c_str()),
+                                    unique_id.length()
+                                );
                                 endpoint::enable(ep0);
                                 return ep0; });
     }
@@ -613,12 +695,18 @@ namespace devices
         register_device_type("REL3", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
                                 on_off_plugin_unit::config_t on_off_config;    
-                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
-                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
-                                endpoint::enable(ep0);
-                                return ep0; });
+                                auto ep3 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg3{};
+                                cluster_t *basic_cl3 = cluster::bridged_device_basic_information::create(ep3, &basic_info_cfg3, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl3, "Outlet", strlen("Outlet"));
+                                std::string unique_id = uid + "_REL3";
+                                cluster::bridged_device_basic_information::attribute::create_unique_id(
+                                    basic_cl3,
+                                    const_cast<char *>(unique_id.c_str()),
+                                    unique_id.length()
+                                );
+                                endpoint::enable(ep3);
+                                return ep3; });
     }
 
     void init_REL4_type()
@@ -626,12 +714,18 @@ namespace devices
         register_device_type("REL4", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
                                 on_off_plugin_unit::config_t on_off_config;    
-                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
-                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
-                                endpoint::enable(ep0);
-                                return ep0; });
+                                auto ep4 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg4{};
+                                cluster_t *basic_cl4 = cluster::bridged_device_basic_information::create(ep4, &basic_info_cfg4, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl4, "Outlet", strlen("Outlet"));
+                                std::string unique_id = uid + "_REL4";
+                                cluster::bridged_device_basic_information::attribute::create_unique_id(
+                                    basic_cl4,
+                                    const_cast<char *>(unique_id.c_str()),
+                                    unique_id.length()
+                                );
+                                endpoint::enable(ep4);
+                                return ep4; });
     }
 
     void init_REL5_type()
@@ -639,12 +733,18 @@ namespace devices
         register_device_type("REL5", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
                                 on_off_plugin_unit::config_t on_off_config;    
-                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
-                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
-                                endpoint::enable(ep0);
-                                return ep0; });
+                                auto ep5 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg5{};
+                                cluster_t *basic_cl5 = cluster::bridged_device_basic_information::create(ep5, &basic_info_cfg5, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl5, "Outlet", strlen("Outlet"));
+                                std::string unique_id = uid + "_REL5";
+                                cluster::bridged_device_basic_information::attribute::create_unique_id(
+                                    basic_cl5,
+                                    const_cast<char *>(unique_id.c_str()),
+                                    unique_id.length()
+                                );
+                                endpoint::enable(ep5);
+                                return ep5; });
     }
 
     void init_REL6_type()
@@ -652,12 +752,18 @@ namespace devices
         register_device_type("REL6", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
                                 on_off_plugin_unit::config_t on_off_config;    
-                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
-                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
-                                endpoint::enable(ep0);
-                                return ep0; });
+                                auto ep6 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg6{};
+                                cluster_t *basic_cl6 = cluster::bridged_device_basic_information::create(ep6, &basic_info_cfg6, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl6, "Outlet", strlen("Outlet"));
+                                std::string unique_id = uid + "_REL6";
+                                cluster::bridged_device_basic_information::attribute::create_unique_id(
+                                    basic_cl6,
+                                    const_cast<char *>(unique_id.c_str()),
+                                    unique_id.length()
+                                );
+                                endpoint::enable(ep6);
+                                return ep6; });
     }
 
     void init_REL7_type()
@@ -665,14 +771,20 @@ namespace devices
         register_device_type("REL7", [](node_t *n, const std::string &uid) -> endpoint_t *
                              {
                                 on_off_plugin_unit::config_t on_off_config;    
-                                auto ep0 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
-                                cluster::bridged_device_basic_information::config_t basic_info_cfg0{};
-                                cluster_t *basic_cl0 = cluster::bridged_device_basic_information::create(ep0, &basic_info_cfg0, CLUSTER_FLAG_SERVER);
-                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl0, "Outlet", strlen("Outlet"));
-                                endpoint::enable(ep0);
-                                return ep0; });
+                                auto ep7 = endpoint::on_off_plugin_unit::create(n, &on_off_config, ENDPOINT_FLAG_DESTROYABLE, nullptr);
+                                cluster::bridged_device_basic_information::config_t basic_info_cfg7{};
+                                cluster_t *basic_cl7 = cluster::bridged_device_basic_information::create(ep7, &basic_info_cfg7, CLUSTER_FLAG_SERVER);
+                                cluster::bridged_device_basic_information::attribute::create_product_name(basic_cl7, "Outlet", strlen("Outlet"));
+                                std::string unique_id = uid + "_REL7";
+                                cluster::bridged_device_basic_information::attribute::create_unique_id(
+                                    basic_cl7,
+                                    const_cast<char *>(unique_id.c_str()),
+                                    unique_id.length()
+                                );
+                                endpoint::enable(ep7);
+                                return ep7; });
     }
-  
+
     void init_DIM0_type()
     {
         register_device_type("DIM0", [](node_t *n, const std::string &uid) -> endpoint_t *
@@ -776,7 +888,7 @@ namespace devices
                                 endpoint::enable(ep3);
                                 return ep3; });
     }
-    
+
     void init_types()
     {
         esp_err_t err = nvs_flash_init();
@@ -795,7 +907,7 @@ namespace devices
         init_REL4_type();
         init_REL5_type();
         init_REL6_type();
-        init_REL7_type();        
+        init_REL7_type();
         init_DIM0_type();
         init_DIM1_type();
         init_DIM2_type();
